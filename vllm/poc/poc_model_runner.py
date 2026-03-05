@@ -237,7 +237,7 @@ def execute_poc_forward(
             slot_mapping=slot_mapping_dict,
         ):
             with poc_forward_context():
-                hidden_states = model(
+                hidden_states = model.model.forward(
                     input_ids=None,
                     positions=positions_single,
                     intermediate_tensors=intermediate_tensors,
