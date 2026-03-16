@@ -236,9 +236,10 @@ def execute_poc_forward(
             attn_metadata, vllm_config,
             num_tokens=seq_len,
             slot_mapping=slot_mapping_dict,
+            skip_compiled=True,
         ):
             with poc_forward_context():
-                hidden_states = model.model.forward(
+                hidden_states = model.forward(
                     input_ids=None,
                     positions=positions_single,
                     intermediate_tensors=intermediate_tensors,
