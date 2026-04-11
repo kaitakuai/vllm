@@ -58,6 +58,8 @@ def rms_norm(
 
     if envs.VLLM_BATCH_INVARIANT:
         return rms_norm_batch_invariant(x, weight, variance_epsilon)
+    if x.dtype in (torch.uint8, torch.int8):
+        x = x.to(torch.bfloat16)
     out = torch.empty_like(x)
     ops.rms_norm(
         out,
