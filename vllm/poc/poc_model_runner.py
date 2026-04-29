@@ -154,6 +154,8 @@ def execute_poc_forward(
     """
     device = worker.device
     dtype = worker.model_config.dtype
+    if dtype in (torch.uint8, torch.int8):
+        dtype = torch.bfloat16
     model = worker.model_runner.model
     vllm_config = worker.vllm_config
     batch_size = len(nonces)
