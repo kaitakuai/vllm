@@ -4,7 +4,9 @@ Full model forward pass with proper V1 attention metadata.
 Uses actual KV cache blocks for attention to work correctly.
 Batched forward pass — processes all nonces in a single forward call.
 """
+import hashlib
 import math
+import os
 import torch
 import torch.distributed as dist
 import numpy as np
@@ -19,6 +21,7 @@ from vllm.logger import init_logger
 from .gpu_random import (
     generate_inputs,
     generate_inputs_concat_murmur,
+    generate_decode_inputs,
     random_pick_indices,
     apply_haar_rotation,
 )
@@ -27,6 +30,133 @@ from .layer_hooks import LayerHouseholderHook, poc_forward_context
 logger = init_logger(__name__)
 
 DEFAULT_K_DIM = 12
+
+# ---------------------------------------------------------------------------
+# decode-PoC (#1135): sphere codebook quantization of decode-step hidden states
+# ---------------------------------------------------------------------------
+# SPHERE_DIM:    number of hidden-state dimensions sliced and projected onto
+#                the unit sphere before nearest-codebook lookup.
+# SPHERE_POINTS: number of equidistant reference points on that sphere; each
+#                decode step commits log2(SPHERE_POINTS) bits (k-id in [0, N)).
+SPHERE_DIM = 256
+SPHERE_POINTS = 16
+
+
+def project_to_sphere(v: torch.Tensor) -> torch.Tensor:
+    """Normalize [..., dim] vectors to the unit sphere (L2 norm = 1)."""
+    return v / (v.norm(dim=-1, keepdim=True) + 1e-8)
+
+
+def _halton_on_sphere(n_points: int, dim: int) -> torch.Tensor:
+    """Return n_points deterministic, low-discrepancy unit vectors on S^(dim-1).
+
+    Uses the Halton sequence (base-prime per dimension) mapped to the sphere
+    via the logit transform.  No randomness — identical output for any call
+    with the same (n_points, dim).
+    """
+    _PRIMES = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29, 31, 37, 41, 43, 47, 53]
+    coords: List[List[float]] = []
+    for d in range(dim):
+        base = _PRIMES[d % len(_PRIMES)]
+        col: List[float] = []
+        for i in range(1, n_points + 1):
+            f, r = 1.0, 0.0
+            j = i
+            while j > 0:
+                f /= base
+                r += f * (j % base)
+                j //= base
+            col.append(r)
+        coords.append(col)
+
+    # [n_points, dim] in (0, 1)^dim  ->  logit  ->  R^dim  ->  sphere
+    raw = torch.tensor(coords, dtype=torch.float32).T.clamp(0.01, 0.99)
+    pts = torch.log(raw / (1.0 - raw))  # logit: roughly normal spread
+    return project_to_sphere(pts)
+
+
+def build_equidistant_codebook(
+    n_points: int,
+    dim: int,
+    n_steps: int = 500,
+    lr: float = 0.05,
+) -> torch.Tensor:
+    """Build a codebook of approximately equidistant points on S^(dim-1).
+
+    Solves the Thomson problem: minimize the electrostatic repulsion energy
+    (sum of 1/distance^2 for all pairs) so points spread as uniformly as
+    possible over the sphere.  Initialisation is deterministic (Halton
+    sequence) — no randomness.
+    """
+    with torch.inference_mode(mode=False):
+        pts = _halton_on_sphere(n_points, dim).clone().requires_grad_(True)
+        opt = torch.optim.Adam([pts], lr=lr)
+
+        eye = torch.eye(n_points)
+        for _ in range(n_steps):
+            opt.zero_grad()
+            p = project_to_sphere(pts)
+            diff = p.unsqueeze(0) - p.unsqueeze(1)
+            d2 = (diff * diff).sum(-1)
+            energy = ((1.0 - eye) / (d2 + 1e-8)).sum()
+            energy.backward()
+            opt.step()
+
+        result = project_to_sphere(pts).detach()
+    return result
+
+
+# Built lazily on first decode-PoC use (NOT at import time) so the production
+# prefill-only PoC v2 path keeps its import cost and behaviour unchanged.
+# Override with an exact, frozen codebook via GONKA_POC_SPHERE_CODEBOOK (path
+# to a torch.save'd float32 [SPHERE_POINTS, SPHERE_DIM] tensor) to guarantee
+# bit-identical k-ids across torch versions / validators.
+_SPHERE_CODEBOOK: Optional[torch.Tensor] = None
+
+
+def get_sphere_codebook() -> torch.Tensor:
+    """Return the (cached) sphere codebook, building or loading it on first use."""
+    global _SPHERE_CODEBOOK
+    if _SPHERE_CODEBOOK is not None:
+        return _SPHERE_CODEBOOK
+
+    path = os.environ.get("GONKA_POC_SPHERE_CODEBOOK")
+    if path:
+        cb = torch.load(path, map_location="cpu").float()
+        if tuple(cb.shape) != (SPHERE_POINTS, SPHERE_DIM):
+            raise ValueError(
+                f"GONKA_POC_SPHERE_CODEBOOK shape {tuple(cb.shape)} != "
+                f"expected ({SPHERE_POINTS}, {SPHERE_DIM})"
+            )
+        cb = project_to_sphere(cb)
+        logger.info("PoC decode: loaded sphere codebook from %s", path)
+    else:
+        cb = build_equidistant_codebook(SPHERE_POINTS, SPHERE_DIM)
+
+    digest = hashlib.sha256(cb.cpu().numpy().tobytes()).hexdigest()[:16]
+    logger.info(
+        "PoC decode: sphere codebook ready (points=%d, dim=%d, sha256=%s)",
+        SPHERE_POINTS, SPHERE_DIM, digest,
+    )
+    _SPHERE_CODEBOOK = cb
+    return cb
+
+
+def nearest_sphere_index(
+    query: torch.Tensor,
+    codebook: torch.Tensor,
+) -> torch.Tensor:
+    """Return the index of the nearest codebook point for each query vector.
+
+    Args:
+        query: unit vectors (one per nonce) [batch, dim]
+        codebook: unit vectors from the sphere codebook [SPHERE_POINTS, dim]
+
+    Returns:
+        index k in [0, SPHERE_POINTS) per query [batch]
+    """
+    sims = query.float() @ codebook.float().T   # [batch, SPHERE_POINTS]
+    return sims.argmax(dim=-1)                   # [batch]
 
 # NOTE: attention metadata must NOT be cached across PoC calls.
 # The metadata builder's internal state (workspace buffers, page-table
