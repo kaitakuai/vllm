@@ -23,9 +23,17 @@ class PoCParams:
 
 @dataclass
 class Artifact:
-    """Single nonce artifact with base64-encoded vector."""
+    """Single nonce artifact with base64-encoded vector.
+
+    decode-PoC (#1135): ``k_points_steps`` holds the per-step sphere k-ids
+    (index 0 = prefill) and ``n_sphere_mismatches`` the teacher-forced
+    divergence count (-1 = generation request).  Both are None on
+    prefill-only (PoC v2) artifacts so v2 payloads keep their exact shape.
+    """
     nonce: int
     vector_b64: str
+    k_points_steps: Optional[List[int]] = None
+    n_sphere_mismatches: Optional[int] = None
 
 
 @dataclass

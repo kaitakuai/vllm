@@ -263,7 +263,8 @@ class GenerateQueue:
                     break
                 
                 elapsed = time.time() - chunk_start_time
-                if elapsed >= POC_GENERATE_CHUNK_TIMEOUT_SEC:
+                # Same (1 + max_tokens) scaling as the RPC wait_for above.
+                if elapsed >= POC_GENERATE_CHUNK_TIMEOUT_SEC * (1 + max(0, job.max_tokens)):
                     raise RuntimeError(f"Timeout waiting for engine: chunk {chunk_idx}")
                 
                 await asyncio.sleep(POC_CHAT_BUSY_BACKOFF_SEC)
@@ -289,7 +290,17 @@ class GenerateQueue:
             fraud_threshold=job.stat_test_fraud_threshold,
             k_dim=job.k_dim,
         )
-        
+
+        # decode-PoC: surface the raw per-nonce teacher-forced mismatch counts;
+        # the k-id fraud verdict is computed by the caller (server returns raw
+        # counts only).  Absent for plain PoC v2 validation jobs.
+        if job.inference_k_points_steps is not None:
+            validation_result["sphere_mismatches"] = {
+                a["nonce"]: a["n_sphere_mismatches"]
+                for a in computed_artifacts
+                if "n_sphere_mismatches" in a
+            }
+
         return {
             "status": "completed",
             "request_id": job.request_id,
@@ -326,6 +337,10 @@ class GenerateQueue:
                 "p_value": result.get("p_value", 1.0),
                 "fraud_detected": result.get("fraud_detected", False),
             }
+            # decode-PoC: forward raw mismatch counts when the job carried a
+            # reference map (key absent for plain PoC v2 validation).
+            if "sphere_mismatches" in result:
+                payload["sphere_mismatches"] = result["sphere_mismatches"]
             self._callback_queue.enqueue(job.callback_url, "validated", payload)
 
 

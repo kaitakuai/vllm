@@ -12,6 +12,21 @@ from .data import Artifact
 
 logger = init_logger(__name__)
 
+
+def _artifact_payload(a: Artifact) -> Dict[str, Any]:
+    """Serialize an Artifact for the callback payload.
+
+    decode-PoC fields are included only when present so prefill-only
+    (PoC v2) payloads keep their exact historical shape.
+    """
+    d: Dict[str, Any] = {"nonce": a.nonce, "vector_b64": a.vector_b64}
+    if a.k_points_steps is not None:
+        d["k_points_steps"] = a.k_points_steps
+    if a.n_sphere_mismatches is not None:
+        d["n_sphere_mismatches"] = a.n_sphere_mismatches
+    return d
+
+
 POC_CALLBACK_INTERVAL_SEC = float(os.environ.get("POC_CALLBACK_INTERVAL_SEC", "5"))
 POC_CALLBACK_MAX_ARTIFACTS = int(os.environ.get("POC_CALLBACK_MAX_ARTIFACTS", "1000000"))
 POC_CALLBACK_RETRY_BACKOFF_SEC = 1.0
@@ -83,7 +98,7 @@ class CallbackSender:
                     self._buffer.clear()
                     self._pending_payload = {
                         **self._metadata,
-                        "artifacts": [{"nonce": a.nonce, "vector_b64": a.vector_b64} for a in artifacts_to_send],
+                        "artifacts": [_artifact_payload(a) for a in artifacts_to_send],
                         "encoding": {"dtype": "f16", "k_dim": self.k_dim, "endian": "le"},
                     }
                     retry_attempt = 0

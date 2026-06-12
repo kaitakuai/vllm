@@ -259,6 +259,9 @@ async def _compute_artifacts_chunk(
 ) -> List[Dict]:
     """Compute artifacts for a chunk with backoff on skip."""
     chunk_start_time = time.time()
+    # Decode adds max_tokens single-token forwards per attempt, so the
+    # total skip-retry window scales the same way the RPC timeout does.
+    effective_timeout = timeout_sec * (1 + max(0, max_tokens))
 
     while True:
         if check_cancelled and check_cancelled():
@@ -280,9 +283,9 @@ async def _compute_artifacts_chunk(
             return result.get("artifacts", [])
         
         elapsed = time.time() - chunk_start_time
-        if elapsed >= timeout_sec:
+        if elapsed >= effective_timeout:
             raise RuntimeError(f"Timeout after {elapsed:.1f}s")
-        
+
         await asyncio.sleep(POC_CHAT_BUSY_BACKOFF_SEC)
 
 
@@ -355,7 +358,15 @@ async def _generation_loop(
             artifacts = result.get("artifacts", [])
             
             if artifacts and callback_sender:
-                artifact_objs = [Artifact(nonce=a["nonce"], vector_b64=a["vector_b64"]) for a in artifacts]
+                artifact_objs = [
+                    Artifact(
+                        nonce=a["nonce"],
+                        vector_b64=a["vector_b64"],
+                        k_points_steps=a.get("k_points_steps"),
+                        n_sphere_mismatches=a.get("n_sphere_mismatches"),
+                    )
+                    for a in artifacts
+                ]
                 callback_sender.add_artifacts(artifact_objs, {
                     "public_key": config["public_key"],
                     "block_hash": config["block_hash"],
@@ -570,7 +581,17 @@ async def generate(request: Request, body: PoCGenerateRequest) -> dict:
         fraud_threshold=stat_test.fraud_threshold,
         k_dim=body.params.k_dim,
     )
-    
+
+    # decode-PoC: surface the raw per-nonce teacher-forced mismatch counts;
+    # the k-id fraud verdict is computed by the caller (server returns raw
+    # counts only).  Absent for plain PoC v2 validation requests.
+    if body.inference_k_points_steps is not None:
+        validation_result["sphere_mismatches"] = {
+            a["nonce"]: a["n_sphere_mismatches"]
+            for a in computed_artifacts
+            if "n_sphere_mismatches" in a
+        }
+
     return {
         "status": "completed",
         "request_id": str(uuid.uuid4()),

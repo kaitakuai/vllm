@@ -351,8 +351,10 @@ def execute_poc_forward(
             batch_size = len(nonces)
             poc_stronger_rng = bool(broadcast_data["poc_stronger_rng"])
             max_tokens = int(broadcast_data["max_tokens"])
-            # inference_k_points_steps is not broadcast: it only affects k-id
-            # bookkeeping on the (single) PP rank that runs the decode loop.
+            # inference_k_points_steps is intentionally not broadcast: every
+            # rank already receives it verbatim as a collective_rpc argument.
+            # All TP ranks need the same map — teacher forcing folds it into
+            # prev_k, which seeds the decode-step forward inputs.
 
     pp_group = get_pp_group()
 
