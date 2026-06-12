@@ -27,12 +27,15 @@ PK = "cafebabe" * 8
 # ---------------------------------------------------------------------------
 
 @pytest.mark.parametrize("seed_str,expected", [
+    # prefill embedding + chained decode embeddings (both donor lines)
     (f"{BH}_{PK}_nonce42", 2840397398),
     (f"{BH}_{PK}_nonce42_decode1_k7", 3049228576),
     (f"{BH}_{PK}_nonce42_decode2_k3", 2004860272),
+    # PoC v2 artifact pick — MUST stay byte-identical to production
     (f"{BH}_{PK}_nonce_42_pick_12", 178240286),
-    (f"{BH}_{PK}_nonce_42_pick_256", 3115550570),
-    (f"{BH}_{PK}_nonce_42_pick_256_k_7", 2414532222),
+    # decode-PoC picks, reference line format (step-salted)
+    (f"{BH}_{PK}_nonce_42_pick_256_decode0", 106668457),
+    (f"{BH}_{PK}_nonce_42_pick_256_decode3_k_7", 3732095856),
 ])
 def test_seed_reference_values(seed_str, expected):
     assert _seed_from_string(seed_str) == expected
@@ -75,16 +78,30 @@ def test_pick_prev_none_is_stable_and_within_range():
         assert len(set(row.tolist())) == k
 
 
-def test_pick_prev_changes_result():
+def test_pick_step_and_prev_change_result():
     nonces, dim, k = [42], 256, 256
-    no_prev = random_pick_indices(BH, PK, nonces, dim, k, CPU)
-    with_prev = random_pick_indices(BH, PK, nonces, dim, k, CPU, prev_point_ids=[7])
-    # same multiset of indices (it's a permutation of all dims for k==dim) but a
-    # different seed must produce a different *ordering*.
-    assert not torch.equal(no_prev, with_prev)
-    # chaining on a different prev yields yet another ordering
-    other_prev = random_pick_indices(BH, PK, nonces, dim, k, CPU, prev_point_ids=[8])
-    assert not torch.equal(with_prev, other_prev)
+    legacy = random_pick_indices(BH, PK, nonces, dim, k, CPU)
+    step0 = random_pick_indices(BH, PK, nonces, dim, k, CPU, step=0)
+    # step salting separates decode-PoC picks from the legacy v2 seed; for
+    # k==dim every result is a permutation of all dims, so the *ordering*
+    # must differ.
+    assert not torch.equal(legacy, step0)
+
+    dec1 = random_pick_indices(BH, PK, nonces, dim, k, CPU,
+                               prev_point_ids=[7], step=1)
+    dec2_same_prev = random_pick_indices(BH, PK, nonces, dim, k, CPU,
+                                         prev_point_ids=[7], step=2)
+    dec1_other_prev = random_pick_indices(BH, PK, nonces, dim, k, CPU,
+                                          prev_point_ids=[8], step=1)
+    assert not torch.equal(dec1, dec2_same_prev)   # step folds into the seed
+    assert not torch.equal(dec1, dec1_other_prev)  # prev_k folds into the seed
+
+
+def test_pick_prev_without_step_rejected():
+    # The legacy v2 path (step=None) must never chain: a prev_point_ids
+    # without step would silently produce a non-spec seed.
+    with pytest.raises(ValueError):
+        random_pick_indices(BH, PK, [42], 256, 12, CPU, prev_point_ids=[7])
 
 
 # ---------------------------------------------------------------------------

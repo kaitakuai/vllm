@@ -263,6 +263,122 @@ def _create_v1_attn_metadata(batch_size, seq_len, block_size, device, worker):
     return attn_metadata_dict, slot_mapping_dict
 
 
+def _create_decode_attn_metadata_with_history(
+    batch_size,
+    prefill_seq_len,
+    step,
+    block_size,
+    device,
+    worker,
+    prefill_blocks_per_seq,
+    max_decode_blocks_per_seq,
+    decode_block_start,
+    prefill_seq_idx=None,
+):
+    """Create attention metadata for a single decode step with full context history.
+
+    One new token per sequence (the query) attends to all prefill_seq_len + step
+    tokens in the KV cache — real autoregressive decode semantics (decode-PoC
+    reference line, bs/poc-context-fix).  Physical block layout must be
+    consistent with what _create_v1_attn_metadata wrote during the prefill:
+      - seq i prefill blocks: p_i*prefill_blocks_per_seq .. (p_i+1)*prefill_blocks_per_seq - 1,
+        where p_i = prefill_seq_idx[i] is the sequence's ORIGINAL batch
+        position (NaN filters may have shrunk the batch after the prefill)
+      - seq i decode blocks:  decode_block_start + i*max_decode_blocks_per_seq + j
+    """
+    from vllm.v1.attention.backend import CommonAttentionMetadata
+
+    if prefill_seq_idx is None:
+        prefill_seq_idx = list(range(batch_size))
+
+    new_pos = prefill_seq_len + step - 1
+    block_in_seq = new_pos // block_size
+    slot_in_block = new_pos % block_size
+    context_len = prefill_seq_len + step
+    total_blocks_for_context = math.ceil(context_len / block_size)
+
+    slot_mapping_list = []
+    block_table_rows = []
+
+    for seq_idx in range(batch_size):
+        phys_prefill_base = prefill_seq_idx[seq_idx] * prefill_blocks_per_seq
+        if block_in_seq < prefill_blocks_per_seq:
+            phys_block = phys_prefill_base + block_in_seq
+        else:
+            decode_blk_idx = block_in_seq - prefill_blocks_per_seq
+            phys_block = (
+                decode_block_start
+                + seq_idx * max_decode_blocks_per_seq
+                + decode_blk_idx
+            )
+        slot_mapping_list.append(phys_block * block_size + slot_in_block)
+
+        row = []
+        for blk_in_seq in range(total_blocks_for_context):
+            if blk_in_seq < prefill_blocks_per_seq:
+                row.append(phys_prefill_base + blk_in_seq)
+            else:
+                decode_blk_idx = blk_in_seq - prefill_blocks_per_seq
+                row.append(
+                    decode_block_start
+                    + seq_idx * max_decode_blocks_per_seq
+                    + decode_blk_idx
+                )
+        block_table_rows.append(row)
+
+    slot_mapping = torch.tensor(slot_mapping_list, dtype=torch.long, device=device)
+    block_table = torch.tensor(block_table_rows, dtype=torch.int32, device=device)
+
+    query_start_loc_gpu = torch.arange(
+        batch_size + 1, dtype=torch.int32, device=device
+    )
+    query_start_loc_cpu = torch.arange(
+        batch_size + 1, dtype=torch.int32, device="cpu"
+    )
+    seq_lens_gpu = torch.full(
+        (batch_size,), context_len, dtype=torch.int32, device=device
+    )
+    seq_lens_cpu = torch.full(
+        (batch_size,), context_len, dtype=torch.int32, device="cpu"
+    )
+
+    common_attn_metadata = CommonAttentionMetadata(
+        query_start_loc=query_start_loc_gpu,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=seq_lens_gpu,
+        num_reqs=batch_size,
+        num_actual_tokens=batch_size,
+        max_query_len=1,
+        max_seq_len=context_len,
+        block_table_tensor=block_table,
+        slot_mapping=slot_mapping,
+        causal=True,
+        _seq_lens_cpu=seq_lens_cpu,
+        seq_lens_cpu_upper_bound=seq_lens_cpu,
+        _num_computed_tokens_cpu=torch.full(
+            (batch_size,), prefill_seq_len + step - 1,
+            dtype=torch.int32, device="cpu",
+        ),
+    )
+
+    model_runner = worker.model_runner
+    attn_metadata_dict = {}
+    slot_mapping_dict = {}
+
+    for kv_cache_group_attn_groups in model_runner.attn_groups:
+        for attn_group in kv_cache_group_attn_groups:
+            builder = attn_group.get_metadata_builder(0)
+            metadata = builder.build(
+                common_prefix_len=0,
+                common_attn_metadata=common_attn_metadata,
+            )
+            for layer_name in attn_group.layer_names:
+                attn_metadata_dict[layer_name] = metadata
+                slot_mapping_dict[layer_name] = slot_mapping
+
+    return attn_metadata_dict, slot_mapping_dict
+
+
 def _get_or_create_attn_metadata(batch_size, seq_len, block_size, device, worker):
     """Create fresh attention metadata for the given parameters."""
     return _create_v1_attn_metadata(batch_size, seq_len, block_size, device, worker)
@@ -313,9 +429,12 @@ def execute_poc_forward(
     Processes all nonces in a single forward call for maximum throughput.
 
     decode-PoC (#1135): when ``max_tokens > 0`` the prefill is followed by
-    ``max_tokens`` chained single-token decode steps.  Each step quantizes the
-    decode hidden state to the nearest sphere-codebook point; the per-step k-id
-    array (``k_points_steps``, index 0 = prefill) is returned per nonce.  For
+    ``max_tokens`` chained single-token decode steps.  Each decode token
+    attends the FULL history (prefill + all previous decode steps) via real
+    KV blocks — autoregressive semantics per the reference line
+    (bs/poc-context-fix).  Each step quantizes the decode hidden state to the
+    nearest sphere-codebook point; the per-step k-id array
+    (``k_points_steps``, index 0 = prefill) is returned per nonce.  For
     validation requests, ``inference_k_points_steps`` maps nonce -> the host's
     reference k-ids; the validator counts divergences (``n_sphere_mismatches``)
     while teacher-forcing the trajectory with the reference k (no cascading).
@@ -448,6 +567,14 @@ def execute_poc_forward(
     hidden_states = hidden_states.view(batch_size, seq_len, -1)
     last_hidden = hidden_states[:, -1, :].float()  # [batch_size, hidden_size]
 
+    # The prefill wrote each sequence's KV into blocks indexed by its ORIGINAL
+    # batch position.  The NaN filters below shrink the batch, so the decode
+    # loop must map each surviving row back to its original position to read
+    # the right prefill blocks (the reference line misses this and reads
+    # shifted KV after filtering).
+    prefill_batch_size = batch_size
+    prefill_seq_idx: List[int] = list(range(batch_size))
+
     # NaN detection
     nan_mask = torch.isnan(last_hidden).any(dim=-1)  # [batch_size]
     if nan_mask.any():
@@ -461,6 +588,7 @@ def execute_poc_forward(
 
         last_hidden = last_hidden[clean_idx]
         nonces = [nonces[i] for i in clean_idx.tolist()]
+        prefill_seq_idx = [prefill_seq_idx[i] for i in clean_idx.tolist()]
         batch_size = len(nonces)
 
     # Normalize to unit sphere
@@ -489,6 +617,7 @@ def execute_poc_forward(
             [i for i, c in enumerate(clean) if c], device=device, dtype=torch.long
         )
         last_hidden = last_hidden[keep_idx]
+        prefill_seq_idx = [s for s, c in zip(prefill_seq_idx, clean) if c]
         batch_size = len(nonces)
         logger.warning("NaN in FP16 output — %d nonces filtered", nan_out.sum())
 
@@ -505,8 +634,11 @@ def execute_poc_forward(
         codebook = get_sphere_codebook().to(device=device, dtype=last_hidden.dtype)
 
         # Prefill k (step 0): pick SPHERE_DIM dims, project, nearest codebook.
+        # step=0 salts the seed (..._pick_256_decode0, reference line format);
+        # the PoC v2 artifact pick above stays on the legacy seed (step=None).
         sph_idx0 = random_pick_indices(
-            block_hash, public_key, nonces, hidden_size, SPHERE_DIM, device
+            block_hash, public_key, nonces, hidden_size, SPHERE_DIM, device,
+            step=0,
         )
         xk_sph0 = project_to_sphere(torch.gather(last_hidden, 1, sph_idx0))
         k0_list: List[int] = nearest_sphere_index(xk_sph0, codebook).cpu().tolist()
@@ -536,9 +668,43 @@ def execute_poc_forward(
             for i in range(batch_size)
         ]
 
+        # Decode KV block layout: decode blocks live AFTER the prefill blocks
+        # (reference line layout).  Decode steps attend the full history, so
+        # prefill KV must stay valid for the whole loop and each step's new
+        # token KV needs a slot that does not collide with prefill blocks.
+        # decode_block_start clears the ORIGINAL prefill region — the batch
+        # may have shrunk in the NaN filters above.
+        prefill_blocks_per_seq = math.ceil(seq_len / block_size)
+        decode_block_start = prefill_batch_size * prefill_blocks_per_seq
+        max_decode_blocks_per_seq = (
+            math.ceil((seq_len + max_tokens) / block_size)
+            - prefill_blocks_per_seq
+            + 1
+        )
+        required_blocks = (
+            decode_block_start + batch_size * max_decode_blocks_per_seq
+        )
+        num_gpu_blocks = getattr(
+            worker.vllm_config.cache_config, "num_gpu_blocks", None
+        )
+        if num_gpu_blocks is not None and required_blocks > num_gpu_blocks:
+            # Out-of-range slot writes corrupt memory silently; refuse instead.
+            raise RuntimeError(
+                f"decode-PoC needs {required_blocks} KV blocks "
+                f"(batch={batch_size}, seq_len={seq_len}, "
+                f"max_tokens={max_tokens}) but only {num_gpu_blocks} exist; "
+                "reduce the PoC batch size or max_tokens."
+            )
+
         for step in range(1, max_tokens + 1):
             if tp_group.world_size > 1:
+                # Rendezvous + pin the trajectory: all TP ranks must seed the
+                # step's forward with the same prev_k (reference line parity).
                 dist.barrier(group=tp_group.cpu_group)
+                if is_tp_driver:
+                    broadcast_tensor_dict({"prev_k": prev_k}, src=0)
+                else:
+                    prev_k = list(broadcast_tensor_dict(src=0)["prev_k"])
 
             # Decode embedding seeded by prev_k (one token per nonce).
             decode_embeds = generate_decode_inputs(
@@ -548,9 +714,15 @@ def execute_poc_forward(
             decode_pos = torch.full(
                 (batch_size,), seq_len + step - 1, device=device, dtype=torch.long
             )
-            # Fresh seq_len=1 metadata every step (stale metadata -> all-NaN).
-            dec_attn_metadata, dec_slot_mapping = _create_v1_attn_metadata(
-                batch_size, 1, block_size, device, worker
+            # Fresh full-history metadata every step (stale metadata -> all-NaN):
+            # the new token attends all seq_len + step context tokens.
+            dec_attn_metadata, dec_slot_mapping = (
+                _create_decode_attn_metadata_with_history(
+                    batch_size, seq_len, step, block_size, device, worker,
+                    prefill_blocks_per_seq, max_decode_blocks_per_seq,
+                    decode_block_start,
+                    prefill_seq_idx=prefill_seq_idx,
+                )
             )
 
             with set_forward_context(
@@ -574,9 +746,11 @@ def execute_poc_forward(
                 last_hidden_dec.norm(dim=-1, keepdim=True) + 1e-8
             )
 
-            # Dimension subset is also chained on prev_k.
+            # Dimension subset is chained on prev_k AND salted with the step
+            # index (without the step there are only SPHERE_POINTS subsets).
             sph_idx_dec = random_pick_indices(
-                block_hash, public_key, nonces, hidden_size, SPHERE_DIM, device, prev_k
+                block_hash, public_key, nonces, hidden_size, SPHERE_DIM, device,
+                prev_point_ids=prev_k, step=step,
             )
             xk_sph_dec = project_to_sphere(
                 torch.gather(last_hidden_dec, 1, sph_idx_dec)

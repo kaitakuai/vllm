@@ -261,31 +261,47 @@ def random_pick_indices(
     k: int,
     device: torch.device,
     prev_point_ids: Optional[List[int]] = None,
+    step: Optional[int] = None,
 ) -> torch.Tensor:
     """Pick k dimensions per nonce deterministically (vectorized).
 
-    When ``prev_point_ids`` is None the seed format and result are
-    byte-identical to the production PoC v2 path
-    (``{block_hash}_{public_key}_nonce_{nonce}_pick_{k}``).  When supplied
-    (decode-PoC chaining), the previous step's sphere-k point is folded into
-    the seed (``..._pick_{k}_k_{prev}``) so each decode step's dimension
-    subset depends on its predecessor.  The only change vs. the reference
-    is vectorization of the murmur3 scoring; per-nonce seeds are identical.
+    When ``step`` is None the seed format and result are byte-identical to
+    the production PoC v2 path
+    (``{block_hash}_{public_key}_nonce_{nonce}_pick_{k}``); chaining is not
+    allowed on this path.
+
+    decode-PoC (#1135) callers pass ``step`` (0 = prefill sphere pick,
+    1..N = decode steps), which salts the seed
+    (``..._pick_{k}_decode{step}``), plus ``prev_point_ids`` on decode steps
+    (``..._pick_{k}_decode{step}_k_{prev}``).  Folding the step index in
+    keeps the dimension subset unique per step: chained on prev_k alone
+    there are only SPHERE_POINTS possible subsets, which is predictable.
+    Formats match the decode-PoC reference line (bs/poc-context-fix); the
+    only change vs. the reference is vectorization of the murmur3 scoring.
     """
     if k <= 0 or k > dim:
         raise ValueError(f"k must be in [1, dim], got k={k}, dim={dim}")
+    if step is None and prev_point_ids is not None:
+        raise ValueError(
+            "prev_point_ids requires step (decode-PoC path); "
+            "the legacy PoC v2 path (step=None) does not chain"
+        )
 
     batch_size = len(nonces)
 
     seeds = []
     for i, nonce in enumerate(nonces):
-        if prev_point_ids is None:
+        if step is None:
             seeds.append(_seed_from_string(
                 f"{block_hash}_{public_key}_nonce_{nonce}_pick_{k}"
             ))
+        elif prev_point_ids is None:
+            seeds.append(_seed_from_string(
+                f"{block_hash}_{public_key}_nonce_{nonce}_pick_{k}_decode{step}"
+            ))
         else:
             seeds.append(_seed_from_string(
-                f"{block_hash}_{public_key}_nonce_{nonce}_pick_{k}_k_{prev_point_ids[i]}"
+                f"{block_hash}_{public_key}_nonce_{nonce}_pick_{k}_decode{step}_k_{prev_point_ids[i]}"
             ))
 
     all_idx = torch.arange(dim, device=device, dtype=torch.int32).unsqueeze(0).expand(batch_size, -1)
