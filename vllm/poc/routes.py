@@ -44,6 +44,8 @@ class PoCParamsModel(BaseModel):
     model: str
     seq_len: int
     k_dim: int = 12
+    # decode-PoC (#1135): number of chained decode steps; 0 = prefill-only PoC v2.
+    max_tokens: int = 0
 
 
 class PoCInitGenerateRequest(BaseModel):
@@ -113,6 +115,10 @@ class PoCGenerateRequest(BaseModel):
     validation: Optional[ValidationModel] = None
     stat_test: Optional[StatTestModel] = None
     poc_stronger_rng: bool = False
+    # decode-PoC validation: maps nonce -> the host's reference k-id array.
+    # When present, the server teacher-forces the decode trajectory and reports
+    # n_sphere_mismatches per nonce.
+    inference_k_points_steps: Optional[Dict[int, List[int]]] = None
 
 
 # =============================================================================
@@ -224,6 +230,20 @@ async def _cancel_poc_tasks(app_id: int):
 
 
 
+def _slice_inference_map(
+    inference_k_points_steps: Optional[Dict[int, List[int]]],
+    chunk_nonces: List[int],
+) -> Optional[Dict[int, List[int]]]:
+    """Restrict a nonce->reference-k map to the nonces present in a chunk."""
+    if inference_k_points_steps is None:
+        return None
+    return {
+        n: inference_k_points_steps[n]
+        for n in chunk_nonces
+        if n in inference_k_points_steps
+    }
+
+
 async def _compute_artifacts_chunk(
     engine_client,
     nonces: List[int],
@@ -234,14 +254,16 @@ async def _compute_artifacts_chunk(
     poc_stronger_rng: bool = False,
     timeout_sec: float = POC_GENERATE_CHUNK_TIMEOUT_SEC,
     check_cancelled: Optional[callable] = None,
+    max_tokens: int = 0,
+    inference_k_points_steps: Optional[Dict[int, List[int]]] = None,
 ) -> List[Dict]:
     """Compute artifacts for a chunk with backoff on skip."""
     chunk_start_time = time.time()
-    
+
     while True:
         if check_cancelled and check_cancelled():
             raise RuntimeError("Cancelled")
-        
+
         result = await engine_client.poc_request("generate_artifacts", {
             "nonces": nonces,
             "block_hash": block_hash,
@@ -249,8 +271,11 @@ async def _compute_artifacts_chunk(
             "seq_len": seq_len,
             "k_dim": k_dim,
             "poc_stronger_rng": poc_stronger_rng,
+            "max_tokens": max_tokens,
+            "inference_k_points_steps": _slice_inference_map(
+                inference_k_points_steps, nonces),
         })
-        
+
         if not result.get("skipped"):
             return result.get("artifacts", [])
         
@@ -304,6 +329,7 @@ async def _generation_loop(
                         "seq_len": config["seq_len"],
                         "k_dim": config["k_dim"],
                         "poc_stronger_rng": config["poc_stronger_rng"],
+                        "max_tokens": config.get("max_tokens", 0),
                     },
                     timeout_ms=POC_RPC_TIMEOUT_MS
                 )
@@ -384,6 +410,7 @@ async def init_generate(request: Request, body: PoCInitGenerateRequest) -> dict:
         "seq_len": body.params.seq_len,
         "k_dim": body.params.k_dim,
         "poc_stronger_rng": body.poc_stronger_rng,
+        "max_tokens": body.params.max_tokens,
     }
     
     stats = {"start_time": 0, "total_processed": 0}
@@ -474,6 +501,8 @@ async def generate(request: Request, body: PoCGenerateRequest) -> dict:
             stat_test_p_mismatch=stat_test.p_mismatch,
             stat_test_fraud_threshold=stat_test.fraud_threshold,
             callback_url=body.url,
+            max_tokens=body.params.max_tokens,
+            inference_k_points_steps=body.inference_k_points_steps,
         )
         
         request_id = await queue.enqueue(job)
@@ -511,7 +540,9 @@ async def generate(request: Request, body: PoCGenerateRequest) -> dict:
             artifacts = await _compute_artifacts_chunk(
                 engine_client, chunk, body.block_hash, body.public_key,
                 body.params.seq_len, body.params.k_dim, body.poc_stronger_rng,
-                POC_GENERATE_CHUNK_TIMEOUT_SEC, check_cancelled
+                POC_GENERATE_CHUNK_TIMEOUT_SEC, check_cancelled,
+                max_tokens=body.params.max_tokens,
+                inference_k_points_steps=body.inference_k_points_steps,
             )
             computed_artifacts.extend(artifacts)
             logger.debug(f"PoC /generate: chunk {chunk_idx+1}/{n_chunks} done ({len(chunk)} nonces)")

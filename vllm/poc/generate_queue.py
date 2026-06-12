@@ -39,6 +39,10 @@ class GenerateJob:
     stat_test_p_mismatch: float = DEFAULT_P_MISMATCH
     stat_test_fraud_threshold: float = DEFAULT_FRAUD_THRESHOLD
     callback_url: Optional[str] = None
+    # decode-PoC (#1135): chained decode steps + optional per-nonce reference
+    # k-ids for validation (teacher forcing).
+    max_tokens: int = 0
+    inference_k_points_steps: Optional[Dict[int, List[int]]] = None
     created_at: float = field(default_factory=time.time)
 
 
@@ -229,6 +233,11 @@ class GenerateQueue:
                     continue
                 
                 try:
+                    chunk_inf_map = (
+                        {n: job.inference_k_points_steps[n]
+                         for n in chunk if n in job.inference_k_points_steps}
+                        if job.inference_k_points_steps is not None else None
+                    )
                     result = await asyncio.wait_for(
                         job.engine_client.poc_request("generate_artifacts", {
                             "nonces": chunk,
@@ -237,8 +246,10 @@ class GenerateQueue:
                             "seq_len": job.seq_len,
                             "k_dim": job.k_dim,
                             "poc_stronger_rng": job.poc_stronger_rng,
+                            "max_tokens": job.max_tokens,
+                            "inference_k_points_steps": chunk_inf_map,
                         }),
-                        timeout=POC_GENERATE_CHUNK_TIMEOUT_SEC
+                        timeout=POC_GENERATE_CHUNK_TIMEOUT_SEC * (1 + max(0, job.max_tokens))
                     )
                 except asyncio.CancelledError:
                     logger.info(f"PoC queue job {job.request_id[:8]}: cancelled during RPC")

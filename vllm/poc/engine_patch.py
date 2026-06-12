@@ -67,7 +67,11 @@ async def poc_request(self, action: str, payload: dict, timeout_ms: int = 60000)
     seq_len = payload.get("seq_len", 256)
     k_dim = payload.get("k_dim", 12)
     poc_stronger_rng = payload.get("poc_stronger_rng", False)
-    
+    # decode-PoC (#1135): max_tokens>0 enables the chained decode loop;
+    # inference_k_points_steps maps nonce -> host reference k-ids (validation).
+    max_tokens = payload.get("max_tokens", 0)
+    inference_k_points_steps = payload.get("inference_k_points_steps", None)
+
     if not nonces:
         return {"artifacts": []}
     
@@ -101,8 +105,9 @@ async def poc_request(self, action: str, payload: dict, timeout_ms: int = 60000)
             logger.warning(f"Could not get hidden_size from config, using default: {hidden_size}")
     
     try:
-        # Use collective_rpc to execute PoC forward on all workers
-        timeout_sec = timeout_ms / 1000.0
+        # Use collective_rpc to execute PoC forward on all workers.
+        # Decode adds max_tokens single-token forwards, so scale the timeout.
+        timeout_sec = (timeout_ms / 1000.0) * (1 + max(0, max_tokens))
         results = await self.collective_rpc(
             execute_poc_forward,
             timeout=timeout_sec,
@@ -114,24 +119,33 @@ async def poc_request(self, action: str, payload: dict, timeout_ms: int = 60000)
                 hidden_size,
                 k_dim,
                 poc_stronger_rng,
+                max_tokens,
+                inference_k_points_steps,
             ),
         )
-        
+
         # Only the last PP rank returns a result
         result = next((r for r in results if r is not None), None)
-        
+
         if result is None:
             return {"artifacts": [], "skipped": True}
-        
+
         # Convert result to artifact format
         vectors = result.get("vectors")  # FP16 numpy array
         result_nonces = result.get("nonces", nonces)
-        
+        # decode-PoC outputs (present only when max_tokens>0)
+        k_points_steps = result.get("k_points_steps")
+        n_sphere_mismatches = result.get("n_sphere_mismatches")
+
         artifacts = []
         for i, nonce in enumerate(result_nonces):
-            vector_b64 = encode_vector(vectors[i])
-            artifacts.append({"nonce": nonce, "vector_b64": vector_b64})
-        
+            artifact = {"nonce": nonce, "vector_b64": encode_vector(vectors[i])}
+            if k_points_steps is not None:
+                artifact["k_points_steps"] = k_points_steps[i]
+            if n_sphere_mismatches is not None:
+                artifact["n_sphere_mismatches"] = n_sphere_mismatches[i]
+            artifacts.append(artifact)
+
         return {"artifacts": artifacts}
         
     except asyncio.TimeoutError:
