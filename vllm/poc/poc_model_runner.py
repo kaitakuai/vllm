@@ -305,10 +305,20 @@ def execute_poc_forward(
     hidden_size: int,
     k_dim: int = DEFAULT_K_DIM,
     poc_stronger_rng: bool = False,
+    max_tokens: int = 0,
+    inference_k_points_steps: Optional[Dict[int, List[int]]] = None,
 ) -> Optional[Dict[str, Any]]:
     """Execute batched PoC forward pass on a V1 worker.
 
     Processes all nonces in a single forward call for maximum throughput.
+
+    decode-PoC (#1135): when ``max_tokens > 0`` the prefill is followed by
+    ``max_tokens`` chained single-token decode steps.  Each step quantizes the
+    decode hidden state to the nearest sphere-codebook point; the per-step k-id
+    array (``k_points_steps``, index 0 = prefill) is returned per nonce.  For
+    validation requests, ``inference_k_points_steps`` maps nonce -> the host's
+    reference k-ids; the validator counts divergences (``n_sphere_mismatches``)
+    while teacher-forcing the trajectory with the reference k (no cascading).
     """
     device = worker.device
     dtype = worker.model_config.dtype
@@ -330,6 +340,7 @@ def execute_poc_forward(
                 "nonces": nonces,
                 "k_dim": k_dim,
                 "poc_stronger_rng": poc_stronger_rng,
+                "max_tokens": max_tokens,
             }, src=0)
         else:
             broadcast_data = broadcast_tensor_dict(src=0)
@@ -339,8 +350,24 @@ def execute_poc_forward(
             k_dim = int(broadcast_data["k_dim"])
             batch_size = len(nonces)
             poc_stronger_rng = bool(broadcast_data["poc_stronger_rng"])
+            max_tokens = int(broadcast_data["max_tokens"])
+            # inference_k_points_steps is not broadcast: it only affects k-id
+            # bookkeeping on the (single) PP rank that runs the decode loop.
 
     pp_group = get_pp_group()
+
+    do_decode = max_tokens > 0
+    if do_decode and pp_group.world_size > 1:
+        # The decode loop issues per-step model() forwards that require every
+        # PP stage to participate, but only the last PP rank reaches the
+        # post-prefill code.  Rather than silently skip decode (which would
+        # emit a valid-looking prefill-only artifact, as the reference does),
+        # refuse explicitly.  The check is deterministic across ranks
+        # (max_tokens is broadcast), so all ranks raise together.
+        raise RuntimeError(
+            "decode-PoC (max_tokens>0) is not supported with pipeline "
+            f"parallelism (pp_world_size={pp_group.world_size}); use TP only."
+        )
 
     # Pre-forward sync
     if tp_group.world_size > 1:
@@ -454,9 +481,125 @@ def execute_poc_forward(
         clean = ~nan_out
         vectors_f16 = vectors_f16[clean]
         nonces = [n for n, c in zip(nonces, clean) if c]
+        # Keep last_hidden aligned with the surviving nonces so the decode
+        # loop below indexes the same rows as the returned artifacts.
+        keep_idx = torch.tensor(
+            [i for i, c in enumerate(clean) if c], device=device, dtype=torch.long
+        )
+        last_hidden = last_hidden[keep_idx]
+        batch_size = len(nonces)
         logger.warning("NaN in FP16 output — %d nonces filtered", nan_out.sum())
 
-    return {
+    result: Dict[str, Any] = {
         "nonces": nonces,
         "vectors": vectors_f16,
     }
+
+    # -------------------------------------------------------------------------
+    # decode-PoC (#1135): sphere-quantized chained decode steps.
+    # Prefill-only PoC v2 (max_tokens == 0) returns above without touching this.
+    # -------------------------------------------------------------------------
+    if do_decode and batch_size > 0:
+        codebook = get_sphere_codebook().to(device=device, dtype=last_hidden.dtype)
+
+        # Prefill k (step 0): pick SPHERE_DIM dims, project, nearest codebook.
+        sph_idx0 = random_pick_indices(
+            block_hash, public_key, nonces, hidden_size, SPHERE_DIM, device
+        )
+        xk_sph0 = project_to_sphere(torch.gather(last_hidden, 1, sph_idx0))
+        k0_list: List[int] = nearest_sphere_index(xk_sph0, codebook).cpu().tolist()
+
+        # Per-nonce reference k-ids for validation requests (None for generation).
+        inf_steps_per_nonce: List[Optional[List[int]]] = [
+            (inference_k_points_steps.get(n) if inference_k_points_steps else None)
+            for n in nonces
+        ]
+        # n_sphere_mismatches: -1 = generation (non-validation) request.
+        mismatch_count: List[int] = [
+            0 if s is not None else -1 for s in inf_steps_per_nonce
+        ]
+        k_points_steps_per_nonce: List[List[int]] = [[k] for k in k0_list]
+
+        # Compare prefill k against the reference (step 0).
+        for i, inf in enumerate(inf_steps_per_nonce):
+            if inf is not None and len(inf) > 0 and k0_list[i] != inf[0]:
+                mismatch_count[i] += 1
+
+        # Initial prev_k: validation nonces seed with the reference k so both
+        # servers run the same decode trajectory.
+        prev_k: List[int] = [
+            (inf_steps_per_nonce[i][0]
+             if inf_steps_per_nonce[i] is not None and len(inf_steps_per_nonce[i]) > 0
+             else k0_list[i])
+            for i in range(batch_size)
+        ]
+
+        for step in range(1, max_tokens + 1):
+            if tp_group.world_size > 1:
+                dist.barrier(group=tp_group.cpu_group)
+
+            # Decode embedding seeded by prev_k (one token per nonce).
+            decode_embeds = generate_decode_inputs(
+                block_hash, public_key, nonces, prev_k,
+                step=step, dim=hidden_size, device=device, dtype=dtype,
+            )  # [batch_size, 1, hidden_size]
+            decode_pos = torch.full(
+                (batch_size,), seq_len + step - 1, device=device, dtype=torch.long
+            )
+            # Fresh seq_len=1 metadata every step (stale metadata -> all-NaN).
+            dec_attn_metadata, dec_slot_mapping = _create_v1_attn_metadata(
+                batch_size, 1, block_size, device, worker
+            )
+
+            with set_forward_context(
+                dec_attn_metadata, vllm_config,
+                num_tokens=batch_size,
+                slot_mapping=dec_slot_mapping,
+                skip_compiled=True,
+            ):
+                with poc_forward_context():
+                    hs_dec = model(
+                        input_ids=None,
+                        positions=decode_pos,
+                        intermediate_tensors=None,
+                        inputs_embeds=decode_embeds.view(-1, hidden_size),
+                    )
+
+            if isinstance(hs_dec, tuple):
+                hs_dec = hs_dec[0]
+            last_hidden_dec = hs_dec.view(batch_size, 1, -1)[:, 0, :].float()
+            last_hidden_dec = last_hidden_dec / (
+                last_hidden_dec.norm(dim=-1, keepdim=True) + 1e-8
+            )
+
+            # Dimension subset is also chained on prev_k.
+            sph_idx_dec = random_pick_indices(
+                block_hash, public_key, nonces, hidden_size, SPHERE_DIM, device, prev_k
+            )
+            xk_sph_dec = project_to_sphere(
+                torch.gather(last_hidden_dec, 1, sph_idx_dec)
+            )
+            step_k_list: List[int] = nearest_sphere_index(
+                xk_sph_dec, codebook
+            ).cpu().tolist()
+
+            for i, computed_k in enumerate(step_k_list):
+                k_points_steps_per_nonce[i].append(computed_k)
+
+            # Teacher forcing: validation nonces advance on the reference k and
+            # count divergences; generation nonces advance on their own k.
+            new_prev_k: List[int] = []
+            for i, computed_k in enumerate(step_k_list):
+                inf = inf_steps_per_nonce[i]
+                if inf is not None and step < len(inf):
+                    if computed_k != inf[step]:
+                        mismatch_count[i] += 1
+                    new_prev_k.append(inf[step])
+                else:
+                    new_prev_k.append(computed_k)
+            prev_k = new_prev_k
+
+        result["k_points_steps"] = k_points_steps_per_nonce
+        result["n_sphere_mismatches"] = mismatch_count
+
+    return result
