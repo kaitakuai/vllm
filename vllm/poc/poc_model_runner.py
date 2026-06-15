@@ -541,11 +541,14 @@ def execute_poc_forward(
         attn_metadata, vllm_config,
         num_tokens=batch_size * seq_len,
         slot_mapping=slot_mapping_dict,
-        skip_compiled=True,
+        # Follow the server's compilation setting: compiled when not --enforce-eager,
+        # eager otherwise. Removes the PoC eager-jail (decode-PoC compiled mode).
+        skip_compiled=vllm_config.model_config.enforce_eager,
     ):
         with poc_forward_context():
             hidden_states = model(
-                input_ids=None,
+                input_ids=(None if vllm_config.model_config.enforce_eager
+                           else torch.zeros(batch_size * seq_len, dtype=torch.long, device=device)),
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
                 inputs_embeds=inputs_embeds.view(-1, hidden_size) if inputs_embeds is not None else None,
@@ -729,11 +732,13 @@ def execute_poc_forward(
                 dec_attn_metadata, vllm_config,
                 num_tokens=batch_size,
                 slot_mapping=dec_slot_mapping,
-                skip_compiled=True,
+                # decode-PoC compiled mode: follow server compilation setting.
+                skip_compiled=vllm_config.model_config.enforce_eager,
             ):
                 with poc_forward_context():
                     hs_dec = model(
-                        input_ids=None,
+                        input_ids=(None if vllm_config.model_config.enforce_eager
+                                   else torch.zeros(batch_size, dtype=torch.long, device=device)),
                         positions=decode_pos,
                         intermediate_tensors=None,
                         inputs_embeds=decode_embeds.view(-1, hidden_size),
