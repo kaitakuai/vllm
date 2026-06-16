@@ -543,11 +543,11 @@ def execute_poc_forward(
         slot_mapping=slot_mapping_dict,
         # Follow the server's compilation setting: compiled when not --enforce-eager,
         # eager otherwise. Removes the PoC eager-jail (decode-PoC compiled mode).
-        skip_compiled=vllm_config.model_config.enforce_eager,
+        skip_compiled=(vllm_config.model_config.enforce_eager or os.environ.get("GONKA_POC_PREFILL_EAGER") == "1"),
     ):
         with poc_forward_context():
             hidden_states = model(
-                input_ids=(None if vllm_config.model_config.enforce_eager
+                input_ids=(None if (vllm_config.model_config.enforce_eager or os.environ.get("GONKA_POC_PREFILL_EAGER") == "1")
                            else torch.zeros(batch_size * seq_len, dtype=torch.long, device=device)),
                 positions=positions,
                 intermediate_tensors=intermediate_tensors,
@@ -733,11 +733,11 @@ def execute_poc_forward(
                 num_tokens=batch_size,
                 slot_mapping=dec_slot_mapping,
                 # decode-PoC compiled mode: follow server compilation setting.
-                skip_compiled=vllm_config.model_config.enforce_eager,
+                skip_compiled=(vllm_config.model_config.enforce_eager or os.environ.get("GONKA_POC_DECODE_EAGER") == "1"),
             ):
                 with poc_forward_context():
                     hs_dec = model(
-                        input_ids=(None if vllm_config.model_config.enforce_eager
+                        input_ids=(None if (vllm_config.model_config.enforce_eager or os.environ.get("GONKA_POC_DECODE_EAGER") == "1")
                                    else torch.zeros(batch_size, dtype=torch.long, device=device)),
                         positions=decode_pos,
                         intermediate_tensors=None,
