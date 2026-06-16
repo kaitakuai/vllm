@@ -941,10 +941,17 @@ def get_nvcc_cuda_version() -> Version:
 
 
 def get_vllm_version() -> str:
+    # Kaitakuai sampler-stack residual build: default to a PEP-440 local-version
+    # tag so wheels built from this branch (poc-sampler-residual-v0.23) are
+    # unambiguously distinguishable from upstream 0.23.0.
+    # Operators can still override with VLLM_VERSION_OVERRIDE.
+    KAITAKUAI_DEFAULT_VERSION = "0.23.0+gonka.sampler1"
+
     # Allow overriding the version. This is useful to build platform-specific
     # wheels (e.g. CPU, TPU) without modifying the source.
-    if env_version := os.getenv("VLLM_VERSION_OVERRIDE"):
-        print(f"Overriding VLLM version with {env_version} from VLLM_VERSION_OVERRIDE")
+    env_version = os.getenv("VLLM_VERSION_OVERRIDE") or KAITAKUAI_DEFAULT_VERSION
+    if env_version:
+        print(f"Overriding VLLM version with {env_version}")
         os.environ["SETUPTOOLS_SCM_PRETEND_VERSION"] = env_version
         return get_version(write_to="vllm/_version.py")
 
