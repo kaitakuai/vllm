@@ -1,4 +1,13 @@
 <!-- markdownlint-disable MD001 MD041 -->
+
+> **This is a permanent thin fork of `vllm-project/vllm`.**
+> See [`REBASE.md`](./REBASE.md) for the mechanical procedure to rebase
+> our 6-commit sampler stack onto each new vLLM minor.
+> See `mlnode-foundry/docs/adr/0014-residual-fork-permanent-infra.md`
+> for the architecture rationale (Layer 3 upstream pathway is deferred
+> without timeline; this residual is treated as permanent infrastructure).
+> Branch: `poc-sampler-residual-v0.23`. Owner: Kaitaku ML Node team (`@baychak`).
+
 <p align="center">
   <picture>
     <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/vllm-project/vllm/main/docs/assets/logos/vllm-logo-text-dark.png">
