@@ -7,6 +7,7 @@ Batched forward pass — processes all nonces in a single forward call.
 import hashlib
 import math
 import os
+from contextlib import contextmanager
 import torch
 import torch.distributed as dist
 import numpy as np
@@ -168,9 +169,27 @@ def nearest_sphere_index(
 
 
 def _ensure_layer_hooks(worker, block_hash, hidden_size):
-    """Ensure layer hooks are installed for the given block_hash."""
+    """Ensure per-block Householder reflection is installed for ``block_hash``.
+
+    Default: the eager ``register_forward_hook`` path (LayerHouseholderHook).
+    With ``GONKA_POC_NATIVE_HOUSEHOLDER=1``: the graphable native wrapper
+    (attached once before compile/capture; reflection vectors refilled in place
+    on block_hash change). The native path is bit-identical to the hook on the
+    PoC-only batch but is capturable by torch.compile + CUDA-graph.
+    """
     model = worker.model_runner.model
     device = worker.device
+
+    if os.environ.get("GONKA_POC_NATIVE_HOUSEHOLDER") == "1":
+        from .native_householder import attach_native_poc
+        # Reach the real nn.Module under any CUDAGraphWrapper so the wrappers sit
+        # inside the capturable region.
+        inner = model.unwrap() if hasattr(model, "unwrap") else model
+        state = attach_native_poc(inner, hidden_size, device)
+        state.set_block_hash(block_hash)   # in-place refill, addresses stable
+        worker._poc_native_state = state
+        return
+
     existing_hook = getattr(worker, "_poc_layer_hooks", None)
     if existing_hook is not None:
         if existing_hook.block_hash == block_hash:
@@ -179,6 +198,26 @@ def _ensure_layer_hooks(worker, block_hash, hidden_size):
     hook = LayerHouseholderHook(model, block_hash, device, hidden_size)
     hook._setup(model, block_hash, device, hidden_size)
     worker._poc_layer_hooks = hook
+
+
+@contextmanager
+def _poc_reflection(worker):
+    """Activate per-layer reflection around a PoC model() call.
+
+    Native path (GONKA_POC_NATIVE_HOUSEHOLDER=1): flip the persistent ``active``
+    buffer True for the duration, then back to False so any later non-PoC forward
+    that reaches the wrappers is identity. Hook path: the legacy global flag.
+    """
+    state = getattr(worker, "_poc_native_state", None)
+    if state is not None:
+        state.set_active(True)
+        try:
+            yield
+        finally:
+            state.set_active(False)
+    else:
+        with poc_forward_context():
+            yield
 
 
 def _get_block_size(worker):
@@ -545,7 +584,7 @@ def execute_poc_forward(
         # eager otherwise. Removes the PoC eager-jail (decode-PoC compiled mode).
         skip_compiled=(vllm_config.model_config.enforce_eager or os.environ.get("GONKA_POC_PREFILL_EAGER") == "1"),
     ):
-        with poc_forward_context():
+        with _poc_reflection(worker):
             hidden_states = model(
                 input_ids=(None if (vllm_config.model_config.enforce_eager or os.environ.get("GONKA_POC_PREFILL_EAGER") == "1")
                            else torch.zeros(batch_size * seq_len, dtype=torch.long, device=device)),
@@ -735,7 +774,7 @@ def execute_poc_forward(
                 # decode-PoC compiled mode: follow server compilation setting.
                 skip_compiled=(vllm_config.model_config.enforce_eager or os.environ.get("GONKA_POC_DECODE_EAGER") == "1"),
             ):
-                with poc_forward_context():
+                with _poc_reflection(worker):
                     hs_dec = model(
                         input_ids=(None if (vllm_config.model_config.enforce_eager or os.environ.get("GONKA_POC_DECODE_EAGER") == "1")
                                    else torch.zeros(batch_size, dtype=torch.long, device=device)),
