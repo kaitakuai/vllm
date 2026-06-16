@@ -1,0 +1,136 @@
+name: build-sampler-residual
+
+# Builds and publishes the kaitakuai sampler-stack residual image on top of
+# upstream vLLM 0.23.0 (cu129). This branch (poc-sampler-residual-v0.23)
+# carries the 6-commit sampler stack (mixed-mode sampling, enforced tokens,
+# logprobs_mode, structured-output graceful degradation, InputBatch
+# bookkeeping, xpu thread-through). The wheel version baked into the image's
+# vllm._version is 0.23.0+gonka.sampler1; the OCI tag substitutes '-' for
+# '+' because the plus character is not a valid OCI tag character.
+#
+# This is an *overlay* build (Dockerfile.quick):
+#   FROM vllm/vllm-openai:v0.23.0-cu129
+#   COPY ./vllm/*.py over the installed vllm package
+# It does NOT recompile CUDA / .so artifacts, so each rebuild is ~3-5 min
+# regardless of total image size.
+#
+# Tag scheme:
+#   0.23.0-gonka.sampler1            mutable; points at the branch HEAD
+#   0.23.0-gonka.sampler1-<sha9>     immutable; points at the specific commit
+#
+# Mirrors the Stage-1 pattern in build-stage1.yml on
+# mb/feat/port-pocv2-vllm-0.23.0. This first iteration is intentionally
+# minimal: no cosign / SLSA attestation yet — those land in a follow-up
+# alongside the foundry consumer wiring.
+
+on:
+  push:
+    branches:
+      - 'poc-sampler-residual-v0.23'
+    paths:
+      - 'vllm/**'
+      - 'Dockerfile.quick'
+      - '.github/workflows/build-sampler-residual.yml'
+  workflow_dispatch:
+    inputs:
+      base_image:
+        description: 'BASE_IMAGE override. Default: vllm/vllm-openai:v0.23.0-cu129.'
+        required: false
+      image_tag:
+        description: 'Mutable image tag suffix. Default: 0.23.0-gonka.sampler1.'
+        required: false
+
+permissions:
+  packages: write       # GHCR push
+  contents: read
+
+concurrency:
+  group: build-sampler-residual-${{ github.ref }}
+  cancel-in-progress: false   # don't interrupt mid-publish
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+
+      - name: Derive tags + BASE_IMAGE
+        id: tag
+        env:
+          INPUT_BASE_IMAGE: ${{ inputs.base_image }}
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          BASE_IMAGE="${INPUT_BASE_IMAGE:-vllm/vllm-openai:v0.23.0-cu129}"
+          IMAGE_TAG="${INPUT_IMAGE_TAG:-0.23.0-gonka.sampler1}"
+          SHA9="${GITHUB_SHA:0:9}"
+          # Image goes to a dedicated repo (kaitakuai/vllm-sampler-residual)
+          # so it doesn't collide with the pocv2 image at kaitakuai/vllm.
+          IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/vllm-sampler-residual"
+          MUTABLE_TAG="${IMAGE_REPO}:${IMAGE_TAG}"
+          IMMUTABLE_TAG="${IMAGE_REPO}:${IMAGE_TAG}-${SHA9}"
+          {
+            echo "base_image=$BASE_IMAGE"
+            echo "image_tag=$IMAGE_TAG"
+            echo "mutable_tag=$MUTABLE_TAG"
+            echo "immutable_tag=$IMMUTABLE_TAG"
+            echo "sha9=$SHA9"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved: BASE_IMAGE=$BASE_IMAGE → $MUTABLE_TAG (also $IMMUTABLE_TAG)"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+
+      - name: Build and push sampler-residual overlay
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.quick
+          push: true
+          tags: |
+            ${{ steps.tag.outputs.mutable_tag }}
+            ${{ steps.tag.outputs.immutable_tag }}
+          cache-from: type=registry,ref=${{ steps.tag.outputs.mutable_tag }}-buildcache
+          cache-to: type=registry,ref=${{ steps.tag.outputs.mutable_tag }}-buildcache,mode=max
+          build-args: |
+            BASE_IMAGE=${{ steps.tag.outputs.base_image }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.description=kaitakuai sampler-stack residual overlay (BASE: ${{ steps.tag.outputs.base_image }})
+            ai.kaitakuai.vllm.wheel_version=0.23.0+gonka.sampler1
+
+      - name: Summary
+        run: |
+          {
+            echo "### sampler-residual build summary"
+            echo ""
+            echo "- **BASE_IMAGE**: \`${{ steps.tag.outputs.base_image }}\`"
+            echo "- **Wheel version (PEP-440)**: \`0.23.0+gonka.sampler1\`"
+            echo "- **Mutable tag**: \`${{ steps.tag.outputs.mutable_tag }}\`"
+            echo "- **Immutable tag**: \`${{ steps.tag.outputs.immutable_tag }}\`"
+            echo "- **Digest**: \`${{ steps.build.outputs.digest }}\`"
+            echo "- **Commit**: [\`${{ github.sha }}\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})"
+          } >> "$GITHUB_STEP_SUMMARY"
