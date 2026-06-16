@@ -1,55 +1,108 @@
----
-title: Quickstart
----
-[](){ #quickstart }
+# Quickstart
 
 This guide will help you quickly get started with vLLM to perform:
 
-- [Offline batched inference][quickstart-offline]
-- [Online serving using OpenAI-compatible server][quickstart-online]
+- [Offline batched inference](#offline-batched-inference)
+- [Online serving](#online-serving)
 
 ## Prerequisites
 
 - OS: Linux
-- Python: 3.9 -- 3.12
+- Python: 3.10 -- 3.13
+
+!!! note
+    vLLM also works on macOS with [vLLM-Metal](https://github.com/vllm-project/vllm-metal) for Apple Silicon GPU acceleration. See the [GPU installation guide](installation/gpu.md) and select the "Apple Silicon" tab.
 
 ## Installation
 
-If you are using NVIDIA GPUs, you can install vLLM using [pip](https://pypi.org/project/vllm/) directly.
+=== "NVIDIA CUDA"
 
-It's recommended to use [uv](https://docs.astral.sh/uv/), a very fast Python environment manager, to create and manage Python environments. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment and install vLLM using the following commands:
+    If you are using NVIDIA GPUs, you can install vLLM using [pip](https://pypi.org/project/vllm/) directly.
 
-```console
-uv venv --python 3.12 --seed
-source .venv/bin/activate
-uv pip install vllm --torch-backend=auto
-```
+    It's recommended to use [uv](https://docs.astral.sh/uv/), a very fast Python environment manager, to create and manage Python environments. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment and install vLLM using the following commands:
 
-`uv` can [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu126`), set `--torch-backend=cu126` (or `UV_TORCH_BACKEND=cu126`).
+    ```bash
+    uv venv --python 3.12 --seed
+    source .venv/bin/activate
+    uv pip install vllm --torch-backend=auto
+    ```
 
-Another delightful way is to use `uv run` with `--with [dependency]` option, which allows you to run commands such as `vllm serve` without creating any permanent environment:
+    `uv` can [automatically select the appropriate PyTorch index at runtime](https://docs.astral.sh/uv/guides/integration/pytorch/#automatic-backend-selection) by inspecting the installed CUDA driver version via `--torch-backend=auto` (or `UV_TORCH_BACKEND=auto`). To select a specific backend (e.g., `cu126`), set `--torch-backend=cu126` (or `UV_TORCH_BACKEND=cu126`).
 
-```console
-uv run --with vllm vllm --help
-```
+    Another delightful way is to use `uv run` with `--with [dependency]` option, which allows you to run commands such as `vllm serve` without creating any permanent environment:
 
-You can also use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments. You can install `uv` to the conda environment through `pip` if you want to manage it within the environment.
+    ```bash
+    uv run --with vllm vllm --help
+    ```
 
-```console
-conda create -n myenv python=3.12 -y
-conda activate myenv
-pip install --upgrade uv
-uv pip install vllm --torch-backend=auto
-```
+    You can also use [conda](https://docs.conda.io/projects/conda/en/latest/user-guide/getting-started.html) to create and manage Python environments. You can install `uv` to the conda environment through `pip` if you want to manage it within the environment.
+
+    ```bash
+    conda create -n myenv python=3.12 -y
+    conda activate myenv
+    pip install --upgrade uv
+    uv pip install vllm --torch-backend=auto
+    ```
+
+=== "AMD ROCm"
+
+    If you are using AMD GPUs, you can install vLLM using `uv`.
+
+    It's recommended to use [uv](https://docs.astral.sh/uv/), as it gives the extra index [higher priority than the default index](https://docs.astral.sh/uv/pip/compatibility/#packages-that-exist-on-multiple-indexes). `uv` is also a very fast Python environment manager, to create and manage Python environments. Please follow the [documentation](https://docs.astral.sh/uv/#getting-started) to install `uv`. After installing `uv`, you can create a new Python environment and install vLLM using the following commands:
+
+    ```bash
+    uv venv --python 3.12 --seed
+    source .venv/bin/activate
+    uv pip install vllm --extra-index-url https://wheels.vllm.ai/rocm/
+    ```
+
+    !!! note
+        It currently supports Python 3.12, ROCm 7.0 and `glibc >= 2.35`.
+
+    !!! note
+        Note that, previously, docker images were published using AMD's docker release pipeline and were located `rocm/vllm-dev`. This is being deprecated by using vLLM's docker release pipeline.
+
+    !!! tip
+        A nightly Docker image is also available as [vllm/vllm-openai-rocm:nightly](https://hub.docker.com/r/vllm/vllm-openai-rocm/tags) for testing the latest development builds.
+
+=== "Google TPU"
+
+    To run vLLM on Google TPUs, you need to install the `vllm-tpu` package.
+    
+    ```bash
+    uv pip install vllm-tpu
+    ```
+
+    !!! note
+        For more detailed instructions, including Docker, installing from source, and troubleshooting, please refer to the [vLLM on TPU documentation](https://docs.vllm.ai/projects/tpu/en/latest/).
+
+=== "Ascend NPU"
+
+    If you are using Ascend NPUs, you can run vLLM through [vLLM Ascend](https://github.com/vllm-project/vllm-ascend), a community-maintained hardware plugin.
+
+    Follow the installation instructions in the [vLLM Ascend quick start](https://docs.vllm.ai/projects/ascend/en/latest/quick_start.html).
+
+    !!! note
+        Ascend setup depends on your NPU hardware and CANN version. For supported versions, Docker images, and troubleshooting, please refer to the [vLLM Ascend documentation](https://docs.vllm.ai/projects/ascend/en/latest/).
+
+=== "Apple Silicon (Mac)"
+
+    If you are using Apple Silicon Macs, you can use vLLM-Metal for GPU-accelerated inference via Apple's Metal framework.
+
+    Follow the installation instructions in the [vLLM-Metal documentation](https://github.com/vllm-project/vllm-metal#installation).
+
+    !!! note
+        vLLM-Metal uses MLX instead of PyTorch as the compute backend and requires MLX-optimized models from the [mlx-community](https://huggingface.co/mlx-community) on Hugging Face.
+
+    !!! tip
+        For more detailed instructions, please refer to the [GPU installation guide](installation/gpu.md) and select the "Apple Silicon" tab.
 
 !!! note
-    For more detail and non-CUDA platforms, please refer [here][installation-index] for specific instructions on how to install vLLM.
-
-[](){ #quickstart-offline }
+    For more detail and non-CUDA platforms, please refer to the [installation guide](installation/README.md) for specific instructions on how to install vLLM.
 
 ## Offline Batched Inference
 
-With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: <gh-file:examples/offline_inference/basic/basic.py>
+With vLLM installed, you can start generating texts for list of input prompts (i.e. offline batch inferencing). See the example script: [examples/basic/offline_inference/basic.py](../../examples/basic/offline_inference/basic.py)
 
 The first line of this example imports the classes [LLM][vllm.LLM] and [SamplingParams][vllm.SamplingParams]:
 
@@ -60,8 +113,9 @@ The first line of this example imports the classes [LLM][vllm.LLM] and [Sampling
 from vllm import LLM, SamplingParams
 ```
 
-The next section defines a list of input prompts and sampling parameters for text generation. The [sampling temperature](https://arxiv.org/html/2402.05201v1) is set to `0.8` and the [nucleus sampling probability](https://en.wikipedia.org/wiki/Top-p_sampling) is set to `0.95`. You can find more information about the sampling parameters [here][sampling-params].
-!!! warning
+The next section defines a list of input prompts and sampling parameters for text generation. The [sampling temperature](https://arxiv.org/html/2402.05201v1) is set to `0.8` and the [nucleus sampling probability](https://en.wikipedia.org/wiki/Top-p_sampling) is set to `0.95`. You can find more information about the sampling parameters [here](../api/README.md#inference-parameters).
+
+!!! important
     By default, vLLM will use sampling parameters recommended by model creator by applying the `generation_config.json` from the Hugging Face model repository if it exists. In most cases, this will provide you with the best results by default if [SamplingParams][vllm.SamplingParams] is not specified.
 
     However, if vLLM's default sampling parameters are preferred, please set `generation_config="vllm"` when creating the [LLM][vllm.LLM] instance.
@@ -76,7 +130,7 @@ prompts = [
 sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
 ```
 
-The [LLM][vllm.LLM] class initializes vLLM's engine and the [OPT-125M model](https://arxiv.org/abs/2205.01068) for offline inference. The list of supported models can be found [here][supported-models].
+The [LLM][vllm.LLM] class initializes vLLM's engine and the [OPT-125M model](https://arxiv.org/abs/2205.01068) for offline inference. The list of supported models can be found [here](../models/supported_models.md).
 
 ```python
 llm = LLM(model="facebook/opt-125m")
@@ -100,40 +154,76 @@ for output in outputs:
     print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
 ```
 
-[](){ #quickstart-online }
+!!! note
+    The `llm.generate` method does not automatically apply the model's chat template to the input prompt. Therefore, if you are using an Instruct model or Chat model, you should manually apply the corresponding chat template to ensure the expected behavior. Alternatively, you can use the `llm.chat` method and pass a list of messages which have the same format as those passed to OpenAI's `client.chat.completions`:
 
-## OpenAI-Compatible Server
+    ??? code
+    
+        ```python
+        # Using tokenizer to apply chat template
+        from transformers import AutoTokenizer
+    
+        tokenizer = AutoTokenizer.from_pretrained("/path/to/chat_model")
+        messages_list = [
+            [{"role": "user", "content": prompt}]
+            for prompt in prompts
+        ]
+        texts = tokenizer.apply_chat_template(
+            messages_list,
+            tokenize=False,
+            add_generation_prompt=True,
+        )
+        
+        # Generate outputs
+        outputs = llm.generate(texts, sampling_params)
+        
+        # Print the outputs.
+        for output in outputs:
+            prompt = output.prompt
+            generated_text = output.outputs[0].text
+            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+    
+        # Using chat interface.
+        outputs = llm.chat(messages_list, sampling_params)
+        for idx, output in enumerate(outputs):
+            prompt = prompts[idx]
+            generated_text = output.outputs[0].text
+            print(f"Prompt: {prompt!r}, Generated text: {generated_text!r}")
+        ```
+
+## Online Serving
 
 vLLM can be deployed as a server that implements the OpenAI API protocol. This allows vLLM to be used as a drop-in replacement for applications using OpenAI API.
 By default, it starts the server at `http://localhost:8000`. You can specify the address with `--host` and `--port` arguments. The server currently hosts one model at a time and implements endpoints such as [list models](https://platform.openai.com/docs/api-reference/models/list), [create chat completion](https://platform.openai.com/docs/api-reference/chat/completions/create), and [create completion](https://platform.openai.com/docs/api-reference/completions/create) endpoints.
 
 Run the following command to start the vLLM server with the [Qwen2.5-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2.5-1.5B-Instruct) model:
 
-```console
+```bash
 vllm serve Qwen/Qwen2.5-1.5B-Instruct
 ```
 
 !!! note
     By default, the server uses a predefined chat template stored in the tokenizer.
-    You can learn about overriding it [here][chat-template].
-!!! warning
+    You can learn about overriding it [here](../serving/online_serving/README.md#chat-template).
+!!! important
     By default, the server applies `generation_config.json` from the huggingface model repository if it exists. This means the default values of certain sampling parameters can be overridden by those recommended by the model creator.
 
     To disable this behavior, please pass `--generation-config vllm` when launching the server.
 
 This server can be queried in the same format as OpenAI API. For example, to list the models:
 
-```console
+```bash
 curl http://localhost:8000/v1/models
 ```
 
 You can pass in the argument `--api-key` or environment variable `VLLM_API_KEY` to enable the server to check for API key in the header.
+You can pass multiple keys after `--api-key`, and the server will accept any of the keys passed, this can be useful for key rotation.
 
 ### OpenAI Completions API with vLLM
 
 Once your server is started, you can query the model with input prompts:
 
-```console
+```bash
 curl http://localhost:8000/v1/completions \
     -H "Content-Type: application/json" \
     -d '{
@@ -146,22 +236,26 @@ curl http://localhost:8000/v1/completions \
 
 Since this server is compatible with OpenAI API, you can use it as a drop-in replacement for any applications using OpenAI API. For example, another way to query the server is via the `openai` Python package:
 
-```python
-from openai import OpenAI
+??? code
 
-# Modify OpenAI's API key and API base to use vLLM's API server.
-openai_api_key = "EMPTY"
-openai_api_base = "http://localhost:8000/v1"
-client = OpenAI(
-    api_key=openai_api_key,
-    base_url=openai_api_base,
-)
-completion = client.completions.create(model="Qwen/Qwen2.5-1.5B-Instruct",
-                                      prompt="San Francisco is a")
-print("Completion result:", completion)
-```
+    ```python
+    from openai import OpenAI
 
-A more detailed client example can be found here: <gh-file:examples/online_serving/openai_completion_client.py>
+    # Modify OpenAI's API key and API base to use vLLM's API server.
+    openai_api_key = "EMPTY"
+    openai_api_base = "http://localhost:8000/v1"
+    client = OpenAI(
+        api_key=openai_api_key,
+        base_url=openai_api_base,
+    )
+    completion = client.completions.create(
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        prompt="San Francisco is a",
+    )
+    print("Completion result:", completion)
+    ```
+
+A more detailed client example can be found here: [examples/basic/offline_inference/basic.py](../../examples/basic/offline_inference/basic.py)
 
 ### OpenAI Chat Completions API with vLLM
 
@@ -169,7 +263,7 @@ vLLM is designed to also support the OpenAI Chat Completions API. The chat inter
 
 You can use the [create chat completion](https://platform.openai.com/docs/api-reference/chat/completions/create) endpoint to interact with the model:
 
-```console
+```bash
 curl http://localhost:8000/v1/chat/completions \
     -H "Content-Type: application/json" \
     -d '{
@@ -183,32 +277,47 @@ curl http://localhost:8000/v1/chat/completions \
 
 Alternatively, you can use the `openai` Python package:
 
-```python
-from openai import OpenAI
-# Set OpenAI's API key and API base to use vLLM's API server.
-openai_api_key = "EMPTY"
-openai_api_base = "http://localhost:8000/v1"
+??? code
 
-client = OpenAI(
-    api_key=openai_api_key,
-    base_url=openai_api_base,
-)
+    ```python
+    from openai import OpenAI
+    # Set OpenAI's API key and API base to use vLLM's API server.
+    openai_api_key = "EMPTY"
+    openai_api_base = "http://localhost:8000/v1"
 
-chat_response = client.chat.completions.create(
-    model="Qwen/Qwen2.5-1.5B-Instruct",
-    messages=[
-        {"role": "system", "content": "You are a helpful assistant."},
-        {"role": "user", "content": "Tell me a joke."},
-    ]
-)
-print("Chat response:", chat_response)
-```
+    client = OpenAI(
+        api_key=openai_api_key,
+        base_url=openai_api_base,
+    )
+
+    chat_response = client.chat.completions.create(
+        model="Qwen/Qwen2.5-1.5B-Instruct",
+        messages=[
+            {"role": "system", "content": "You are a helpful assistant."},
+            {"role": "user", "content": "Tell me a joke."},
+        ],
+    )
+    print("Chat response:", chat_response)
+    ```
 
 ## On Attention Backends
 
 Currently, vLLM supports multiple backends for efficient Attention computation across different platforms and accelerator architectures. It automatically selects the most performant backend compatible with your system and model specifications.
 
-If desired, you can also manually set the backend of your choice by configuring the environment variable `VLLM_ATTENTION_BACKEND` to one of the following options: `FLASH_ATTN`, `FLASHINFER` or `XFORMERS`.
+If desired, you can also manually set the backend of your choice using the `--attention-backend` CLI argument:
+
+```bash
+# For online serving
+vllm serve Qwen/Qwen2.5-1.5B-Instruct --attention-backend FLASH_ATTN
+
+# For offline inference
+python script.py --attention-backend FLASHINFER
+```
+
+Some of the available backend options include:
+
+- On NVIDIA CUDA: `FLASH_ATTN` or `FLASHINFER`.
+- On AMD ROCm: `TRITON_ATTN`, `ROCM_ATTN`, `ROCM_AITER_FA`, `ROCM_AITER_UNIFIED_ATTN`, `TRITON_MLA`, `ROCM_AITER_MLA` or `ROCM_AITER_TRITON_MLA`.
 
 !!! warning
-    There are no pre-built vllm wheels containing Flash Infer, so you must install it in your environment first. Refer to the [Flash Infer official docs](https://docs.flashinfer.ai/) or see <gh-file:docker/Dockerfile> for instructions on how to install it.
+    There are no pre-built vllm wheels containing Flash Infer, so you must install it in your environment first. Refer to the [Flash Infer official docs](https://docs.flashinfer.ai/) or see [docker/Dockerfile](../../docker/Dockerfile) for instructions on how to install it.

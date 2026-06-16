@@ -1,0 +1,206 @@
+name: contract-tests-residual
+
+# Drift detection for the kaitakuai sampler-stack residual fork.
+#
+# Two jobs run in parallel:
+#
+#   in-fork:
+#     Installs THIS branch as the vllm wheel (editable). Asserts that all
+#     6 patched surfaces (logprobs_mode, enforced_token_ids,
+#     batch_logprobs_mode, need_processed_logprobs, logprobs_modes dict,
+#     XgrammarGrammar._grammar_failed) are present. Failure means a patch
+#     regression on this branch — fix BEFORE merging the PR.
+#
+#   upstream-drift (continue-on-error):
+#     Installs the latest stable vllm wheel from PyPI (NOT our fork) and
+#     runs the same contract tests. This job is EXPECTED to fail on the
+#     patch-added fields (logprobs_mode, enforced_token_ids, etc.). Its
+#     purpose is to alert us when upstream signatures change UNDER our
+#     patches, so the rebase author can adapt BEFORE cherry-picking onto
+#     the next minor. A green run here would actually be interesting — it
+#     would suggest upstream adopted our surface.
+#
+# Schedule: daily 06:00 UTC sentinel run + on every push / PR. Manual
+# dispatch is available too.
+#
+# See REBASE.md for the rebase procedure and ADR-0014 in
+# mlnode-foundry/docs/adr/ for the architecture rationale.
+
+on:
+  push:
+    branches:
+      - 'poc-sampler-residual-v0.23'
+    paths-ignore:
+      - '**/*.md'
+      - '**/REBASE.md'
+      - 'docs/**'
+      - 'LICENSE'
+  pull_request:
+    paths-ignore:
+      - '**/*.md'
+      - '**/REBASE.md'
+      - 'docs/**'
+      - 'LICENSE'
+  workflow_dispatch:
+  schedule:
+    # Daily 06:00 UTC sentinel run — catches upstream drift even when no
+    # commits land on the residual branch.
+    - cron: '0 6 * * *'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: contract-tests-residual-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  in-fork:
+    name: in-fork (residual must satisfy contract)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install upstream vllm + overlay residual patches
+        run: |
+          set -euo pipefail
+          # `pip install -e .` requires torch BEFORE setup.py runs (vllm's
+          # setup.py imports torch for CUDA detection) → ModuleNotFoundError
+          # on a CPU-only runner. Workaround: install upstream wheel from
+          # PyPI (ships torch + compiled kernels), then copy our 8 patched
+          # .py files OVER the installed vllm location. Contract tests are
+          # pure read-only inspect — overlay is sufficient, no rebuild.
+          pip install --upgrade pip
+          pip install vllm==0.23.0 pytest
+          # CWD = repo checkout which contains a vllm/ source dir; Python
+          # would import THAT instead of the installed wheel. Resolve the
+          # install location via pip metadata, NOT via `python -c "import
+          # vllm"`.
+          VLLM_INSTALL_DIR="$(pip show vllm | awk '/^Location:/{print $2}')/vllm"
+          echo "Installed vllm at: $VLLM_INSTALL_DIR"
+          [ -d "$VLLM_INSTALL_DIR" ] || { echo "ERROR: pip show vllm did not yield a valid Location"; exit 1; }
+          # Explicit list — never silently overlay anything the contract
+          # didn't sign off on. Keep in sync with the residual diff
+          # (`git diff v0.23.0..poc-sampler-residual-v0.23 -- 'vllm/**/*.py'`);
+          # Dockerfile.quick uses a `find -name "*.py"` sweep over the same
+          # tree, so any new patched file MUST be added here too.
+          for f in \
+              vllm/sampling_params.py \
+              vllm/v1/sample/metadata.py \
+              vllm/v1/sample/sampler.py \
+              vllm/v1/sample/ops/topk_topp_sampler.py \
+              vllm/v1/worker/gpu_input_batch.py \
+              vllm/v1/worker/gpu_model_runner.py \
+              vllm/v1/structured_output/__init__.py \
+              vllm/v1/structured_output/backend_xgrammar.py; do
+            rel=${f#vllm/}
+            dst="$VLLM_INSTALL_DIR/$rel"
+            [ -f "$f" ] || { echo "ERROR: residual fork missing $f"; exit 1; }
+            [ -f "$dst" ] || { echo "ERROR: upstream vllm missing $dst — overlay target moved"; exit 1; }
+            cp -v "$f" "$dst"
+          done
+
+      - name: Stage contract tests outside the working tree
+        # Same trick as upstream-drift: the cwd has a vllm/ source dir
+        # that shadows the installed (overlaid) wheel. Stage to a tempdir
+        # and run pytest from there so importlib resolves to site-packages.
+        run: |
+          set -euo pipefail
+          STAGE=$(mktemp -d)
+          cp -r tests/contract "$STAGE/contract"
+          : > "$STAGE/contract/conftest.py"
+          echo "STAGE=$STAGE" >> "$GITHUB_ENV"
+
+      - name: Sanity check — patched fields visible on overlaid wheel
+        run: |
+          set -euo pipefail
+          cd "$STAGE"
+          python - <<'PY'
+          # Use __annotations__ — works for both dataclass and msgspec.Struct.
+          # In vllm 0.23 SamplingParams is `msgspec.Struct` (with
+          # PydanticMsgspecMixin), not a dataclass — so __dataclass_fields__
+          # is absent; __annotations__ is the right surface to inspect.
+          from vllm.sampling_params import SamplingParams
+          annotations = set(getattr(SamplingParams, '__annotations__', {}) or {})
+          assert annotations, \
+              "SamplingParams has no __annotations__ — upstream refactor (class moved or fields stripped)"
+          assert 'logprobs_mode' in annotations, \
+              "overlay missed logprobs_mode (present annotations: " + ", ".join(sorted(annotations)) + ")"
+          assert 'enforced_token_ids' in annotations, \
+              "overlay missed enforced_token_ids (present annotations: " + ", ".join(sorted(annotations)) + ")"
+          print("overlay-sanity OK; SamplingParams carries logprobs_mode + enforced_token_ids.")
+          PY
+
+      - name: Run contract tests against overlaid vllm
+        run: |
+          set -euo pipefail
+          cd "$STAGE"
+          pytest contract -v --tb=short
+
+  upstream-drift:
+    name: upstream-drift (alert when upstream signature changes)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # Purpose of this job: ALERT, not gate. Failure here means upstream
+    # has drifted from the surface our patches assume — the rebase author
+    # must reconcile BEFORE accepting the next minor.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install latest upstream vllm from PyPI
+        run: |
+          set -euo pipefail
+          # Use the latest stable upstream wheel — NOT our fork. The
+          # patch-added fields will be missing; that is the signal.
+          pip install --upgrade pip
+          pip install vllm
+          pip install pytest
+
+      - name: Stage contract tests outside the working tree
+        # Copy tests/contract into a tempdir + run pytest from there so we
+        # never accidentally pick up THIS repo as the vllm source root.
+        run: |
+          set -euo pipefail
+          STAGE=$(mktemp -d)
+          cp -r tests/contract "$STAGE/contract"
+          # Drop a no-op conftest so pytest doesn't reach back into the
+          # vllm source tree's conftest.
+          : > "$STAGE/contract/conftest.py"
+          echo "STAGE=$STAGE" >> "$GITHUB_ENV"
+
+      - name: Run contract tests against upstream wheel
+        id: run
+        # When this step fails: upstream drifted. Inspect the diff against
+        # the surface assertions in tests/contract/test_sampler_surface.py
+        # and update REBASE.md + the contract file before the next rebase.
+        run: |
+          set -euo pipefail
+          cd "$STAGE"
+          pytest contract -v --tb=short
+
+      - name: Drift summary
+        if: always()
+        run: |
+          {
+            echo "### upstream-drift sentinel"
+            echo ""
+            if [ "${{ steps.run.outcome }}" = "failure" ]; then
+              echo "**Status:** upstream drifted — manual review needed before next rebase."
+            else
+              echo "**Status:** upstream still matches the surface our patches assume."
+            fi
+            echo ""
+            echo "See REBASE.md for the next-minor rebase procedure."
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -9,28 +9,17 @@ ENV_FILE=$1
 
 # For testing on local vm, use `set -a` to export all variables
 source /etc/environment
-source $ENV_FILE
+# shellcheck source=/dev/null
+source "$ENV_FILE"
 
 remove_docker_container() { 
-    docker rm -f tpu-test || true; 
-    docker rm -f vllm-tpu || true;
-    docker rm -f $CONTAINER_NAME || true;
+    docker rm -f "$CONTAINER_NAME" || true;
 }
 
 trap remove_docker_container EXIT
 
 # Remove the container that might not be cleaned up in the previous run.
 remove_docker_container
-
-# Build docker image.
-# TODO: build the image outside the script and share the image with other
-# tpu test if building time is too long.
-DOCKER_BUILDKIT=1 docker build \
-  --build-arg max_jobs=16 \
-  --build-arg USE_SCCACHE=1 \
-  --build-arg GIT_REPO_CHECK=0 \
-  --tag vllm/vllm-tpu-bm \
-  --progress plain -f docker/Dockerfile.tpu .
 
 LOG_ROOT=$(mktemp -d)
 # If mktemp fails, set -e will cause the script to exit.
@@ -53,13 +42,13 @@ echo
 echo "starting docker...$CONTAINER_NAME"
 echo    
 docker run \
- -v $DOWNLOAD_DIR:$DOWNLOAD_DIR \
- --env-file $ENV_FILE \
+ -v "$DOWNLOAD_DIR":"$DOWNLOAD_DIR" \
+ --env-file "$ENV_FILE" \
  -e HF_TOKEN="$HF_TOKEN" \
- -e TARGET_COMMIT=$BUILDKITE_COMMIT \
- -e MODEL=$MODEL \
+ -e TARGET_COMMIT="$BUILDKITE_COMMIT" \
+ -e MODEL="$MODEL" \
  -e WORKSPACE=/workspace \
- --name $CONTAINER_NAME \
+ --name "$CONTAINER_NAME" \
  -d \
  --privileged \
  --network host \
@@ -68,7 +57,7 @@ docker run \
 
 echo "run script..."
 echo
-docker exec "$CONTAINER_NAME" /bin/bash -c ".buildkite/scripts/hardware_ci/run_bm.sh"
+docker exec "$CONTAINER_NAME" /bin/bash -c ".buildkite/scripts/tpu/run_bm.sh"
 
 echo "copy result back..."
 VLLM_LOG="$LOG_ROOT/$TEST_NAME"_vllm_log.txt

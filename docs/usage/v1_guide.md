@@ -1,12 +1,10 @@
 # vLLM V1
 
-**We have started the process of deprecating V0. Please read [RFC #18571](https://github.com/vllm-project/vllm/issues/18571) for more details.**
+!!! announcement
 
-V1 is now enabled by default for all supported use cases, and we will gradually enable it for every use case we plan to support. Please share any feedback on [GitHub](https://github.com/vllm-project/vllm) or in the [vLLM Slack](https://inviter.co/vllm-slack).
+    We have fully deprecated V0. Please read [RFC #18571](https://github.com/vllm-project/vllm/issues/18571) for more details.
 
-To disable V1, please set the environment variable as: `VLLM_USE_V1=0`, and send us a GitHub issue sharing the reason!
-
-## Why vLLM V1?
+    If you have a use case that works on V0 Engine but not V1, please share it on [GitHub](https://github.com/vllm-project/vllm) or in the [vLLM Slack](https://inviter.co/vllm-slack).
 
 vLLM V0 successfully supported a wide range of models and hardware, but as new features were developed independently, the system grew increasingly complex. This complexity made it harder to integrate new capabilities and introduced technical debt, revealing the need for a more streamlined and unified design.
 
@@ -32,129 +30,161 @@ Upgrade to vLLM’s Core Architecture](https://blog.vllm.ai/2025/01/27/v1-alpha-
 
 This living user guide outlines a few known **important changes and limitations** introduced by vLLM V1. The team has been working actively to bring V1 as the default engine, therefore this guide will be updated constantly as more features get supported on vLLM V1.
 
-### Supports Overview
-#### Hardware
+## Differences from V0
 
-| Hardware | Status                                   |
-|----------|------------------------------------------|
-| **NVIDIA** | <nobr>🚀 Natively Supported</nobr>         |
-| **AMD**    | <nobr>🚧 WIP</nobr>           |
-| **TPU**    | <nobr>🚧 WIP</nobr>           |
-| **CPU**    | <nobr>🚧 WIP</nobr>           |
+This section lists some differences in behavior between V0 and V1.
 
-#### Feature / Model
+### Chunked Prefill
 
-| Feature / Model | Status |
-|-----------------|-----------------------------------------------------------------------------------|
-| **Prefix Caching**                    | <nobr>🚀 Optimized</nobr>                                                        |
-| **Chunked Prefill**                    | <nobr>🚀 Optimized</nobr>                                                        |
-| **LoRA**                                    | <nobr>🚀 Optimized</nobr>                                                         |
-| **Logprobs Calculation**                    | <nobr>🟢 Functional</nobr>                                                        |
-| **Multimodal Models**                       | <nobr>🟢 Functional</nobr>                                                        |
-| **FP8 KV Cache**                            | <nobr>🟢 Functional on Hopper devices ([PR #15191](https://github.com/vllm-project/vllm/pull/15191))</nobr>|
-| **Spec Decode**                             | <nobr>🚧 WIP ([PR #13933](https://github.com/vllm-project/vllm/pull/13933))</nobr>|
-| **Prompt Logprobs with Prefix Caching**     | <nobr>🟡 Planned ([RFC #13414](https://github.com/vllm-project/vllm/issues/13414))</nobr>|
-| **Structured Output Alternative Backends**  | <nobr>🟡 Planned</nobr>                                                           |
-| **Embedding Models**                        | <nobr>🚧 WIP ([PR #16188](https://github.com/vllm-project/vllm/pull/16188))</nobr> |
-| **Mamba Models**                            | <nobr>🟡 Planned</nobr>                                                           |
-| **Encoder-Decoder Models**                  | <nobr>🟠 Delayed</nobr>                                                           |
-| **Request-level Structured Output Backend** | <nobr>🔴 Deprecated</nobr>                                                        |
-| **best_of**                                 | <nobr>🔴 Deprecated ([RFC #13361](https://github.com/vllm-project/vllm/issues/13361))</nobr>|
-| **Per-Request Logits Processors**           | <nobr>🔴 Deprecated ([RFC #13360](https://github.com/vllm-project/vllm/pull/13360))</nobr> |
-| **GPU <> CPU KV Cache Swapping**            | <nobr>🔴 Deprecated</nobr>                                                        |
+Chunked prefill is enabled by default whenever possible, unlike in V0 where it was conditionally enabled based on model characteristics.
 
-- **🚀 Optimized**: Nearly fully optimized, with no further work currently planned.
-- **🟢 Functional**: Fully operational, with ongoing optimizations.  
-- **🚧 WIP**: Under active development.  
-- **🟡 Planned**: Scheduled for future implementation (some may have open PRs/RFCs).  
-- **🟠 Delayed**: Temporarily dropped in V1 but planned to be re-introduced later.
-- **🔴 Deprecated**: Not planned for V1 unless there is strong demand.
+### CUDA Graphs
 
-**Note**: vLLM V1’s unified scheduler treats both prompt and output tokens the same
-way by using a simple dictionary (e.g., `{request_id: num_tokens}`) to dynamically
-allocate a fixed token budget per request, enabling features like chunked prefills,
-prefix caching, and speculative decoding without a strict separation between prefill
-and decode phases.
+CUDA graph capture takes up more memory in V1 than in V0.
 
-### Semantic Changes and Deprecated Features
+### Semantic Changes to Logprobs
 
-#### Logprobs
+#### Logprobs Calculation
 
-vLLM V1 supports logprobs and prompt logprobs. However, there are some important semantic
-differences compared to V0:
-
-**Logprobs Calculation**
-
-Logprobs in V1 are now returned immediately once computed from the model’s raw output (i.e.
+By default, logprobs in V1 are now returned immediately once computed from the model’s raw output (i.e.
 before applying any logits post-processing such as temperature scaling or penalty
 adjustments). As a result, the returned logprobs do not reflect the final adjusted
 probabilities used during sampling.
 
-Support for logprobs with post-sampling adjustments is in progress and will be added in future updates.
+You can adjust this behavior by setting the `--logprobs-mode` flag.
+Four modes are supported: `raw_logprobs` (default), `processed_logprobs`, `raw_logits`, `processed_logits`.
+Raw means the values before applying any logit processors, like bad words.
+Processed means the values after applying all processors, including temperature and top_k/top_p.
 
-**Prompt Logprobs with Prefix Caching**
+#### Prompt Logprobs with Prefix Caching
 
-Currently prompt logprobs are only supported when prefix caching is turned off via `--no-enable-prefix-caching`. In a future release, prompt logprobs will be compatible with prefix caching, but a recomputation will be triggered to recover the full prompt logprobs even upon a prefix cache hit. See details in [RFC #13414](https://github.com/vllm-project/vllm/issues/13414).
+While V1 supports passing prompt logprobs with prefix caching enabled, it no longer caches the logprobs.
+For a request requiring prompt logprobs, the engine will ignore the prefix cache and recompute the prefill of full prompt to generate the logprobs.
 
-#### Deprecated Features
+## Feature Support
 
-As part of the major architectural rework in vLLM V1, several legacy features have been deprecated.
+For each item, its support in vLLM V1 falls into one of the following states:
 
-**Sampling features**
+- **🟢 Functional**: Fully operational with optimizations comparable to or better than V0.
+- **🟡 In Progress**: Planned to be in vLLM V1, with open PRs/RFCs.
+- **🔴 Removed**: Dropped from vLLM V1. Will only consider re-introducing if there is strong demand.
 
-- **best_of**: This feature has been deprecated due to limited usage. See details at [RFC #13361](https://github.com/vllm-project/vllm/issues/13361).
+!!! note
+    vLLM V1’s unified scheduler treats both prompt and output tokens the same
+    way by using a simple dictionary (e.g., `{request_id: num_tokens}`) to dynamically
+    allocate a fixed token budget per request, enabling features like chunked prefills,
+    prefix caching, and speculative decoding without a strict separation between prefill
+    and decode phases.
+
+The V1 scheduler supports multiple scheduling policies, including First-Come,
+First-Served (FCFS) and priority-based scheduling (where requests are processed
+based on assigned priority, with FCFS as a tie-breaker), configurable via the
+`--scheduling-policy` argument.
+
+### Hardware
+
+| Hardware      | Status          |
+| --------------| --------------- |
+| **NVIDIA**    | <nobr>🟢</nobr> |
+| **AMD**       | <nobr>🟢</nobr> |
+| **INTEL GPU** | <nobr>🟢</nobr> |
+| **TPU**       | <nobr>🟢</nobr> |
+| **CPU**       | <nobr>🟢</nobr> |
+
+!!! note
+
+    More hardware platforms may be supported via plugins, e.g.:
+
+    - [vllm-ascend](https://github.com/vllm-project/vllm-ascend)
+    - [vllm-spyre](https://github.com/vllm-project/vllm-spyre)
+    - [vllm-gaudi](https://github.com/vllm-project/vllm-gaudi)
+    - [vllm-openvino](https://github.com/vllm-project/vllm-openvino)
+
+    Please check their corresponding repositories for more details.
+
+### Models
+
+| Model Type                 | Status                                  |
+| -------------------------- | --------------------------------------- |
+| **Decoder-only Models**    | <nobr>🟢</nobr>                         |
+| **Encoder-Decoder Models** | <nobr>🟢 (Whisper), 🔴 (Others) </nobr> |
+| **Pooling Models**         | <nobr>🟢</nobr>                         |
+| **Mamba Models**           | <nobr>🟢</nobr>                         |
+| **Multimodal Models**      | <nobr>🟢</nobr>                         |
+
+See below for the status of models that are not yet supported or have more features planned in V1.
+
+#### Pooling Models
+
+Now fully supported, with prefix caching and chunked prefill newly available for last-pooling models.
+
+We are working on enabling prefix caching and chunked prefill for more categories of pooling models.
+
+#### Mamba Models
+
+Models using selective state-space mechanisms instead of standard transformer attention are supported.
+Models that use Mamba-2 and Mamba-1 layers (e.g., `Mamba2ForCausalLM`, `MambaForCausalLM`, `FalconMambaForCausalLM`) are supported.
+
+Hybrid models that combine Mamba-2 and Mamba-1 layers with standard attention layers are also supported (e.g., `BambaForCausalLM`,
+`Zamba2ForCausalLM`, `NemotronHForCausalLM`, `FalconH1ForCausalLM` and `GraniteMoeHybridForCausalLM`, `JambaForCausalLM`, `Plamo2ForCausalLM`).
+
+Hybrid models with mechanisms different to Mamba are also supported (e.g, `MiniMaxText01ForCausalLM`, `MiniMaxM1ForCausalLM`, `Lfm2ForCausalLM`).
+
+Please note that prefix caching is not yet supported for any of the above models.
+
+#### Encoder-Decoder Models
+
+Whisper is supported natively. Other encoder-decoder models are supported via the plugin system:
+
+- **BART**: `BartForConditionalGeneration` is supported via the official [bart-plugin](https://github.com/vllm-project/bart-plugin).
+- **Florence-2**: `Florence2ForConditionalGeneration` is supported via the official [bart-plugin](https://github.com/vllm-project/bart-plugin).
+
+For other encoder-decoder models (e.g., `MllamaForConditionalGeneration`), we recommend
+following a similar pattern by implementing support through the [plugin system](../design/plugin_system.md).
+
+### Features
+
+| Feature                                     | Status                                                                            |
+| ------------------------------------------- | --------------------------------------------------------------------------------- |
+| **Prefix Caching**                          | <nobr>🟢 Functional</nobr>                                                        |
+| **Chunked Prefill**                         | <nobr>🟢 Functional</nobr>                                                        |
+| **LoRA**                                    | <nobr>🟢 Functional</nobr>                                                        |
+| **Logprobs Calculation**                    | <nobr>🟢 Functional</nobr>                                                        |
+| **FP8 KV Cache**                            | <nobr>🟢 Functional</nobr>                                                        |
+| **Spec Decode**                             | <nobr>🟢 Functional</nobr>                                                        |
+| **Prompt Logprobs with Prefix Caching**     | <nobr>🟢 Functional</nobr>                                                        |
+| **Structured Output Alternative Backends**  | <nobr>🟢 Functional</nobr>                                                        |
+| **Concurrent Partial Prefills**             | <nobr>🟡 [In Progress](https://github.com/vllm-project/vllm/issues/14003)</nobr>  |
+| **best_of**                                 | <nobr>🔴 [Removed](https://github.com/vllm-project/vllm/issues/13361)</nobr>      |
+| **Per-Request Logits Processors**           | <nobr>🔴 [Removed](https://github.com/vllm-project/vllm/pull/13360)</nobr>        |
+| **GPU <> CPU KV Cache Swapping**            | <nobr>🔴 Removed</nobr>                                                           |
+| **Request-level Structured Output Backend** | <nobr>🔴 Removed</nobr>                                                           |
+
+!!! note
+
+    vLLM V1’s unified scheduler treats both prompt and output tokens the same
+    way by using a simple dictionary (e.g., `{request_id: num_tokens}`) to dynamically
+    allocate a fixed token budget per request, enabling features like chunked prefills,
+    prefix caching, and speculative decoding without a strict separation between prefill
+    and decode phases.
+
+#### Removed Features
+
+As part of the major architectural rework in vLLM V1, several legacy features have been removed.
+
+##### Sampling features
+
+- **best_of**: This feature has been removed due to limited usage. See details at [RFC #13361](https://github.com/vllm-project/vllm/issues/13361).
 - **Per-Request Logits Processors**: In V0, users could pass custom
   processing functions to adjust logits on a per-request basis. In vLLM V1, this
-  feature has been deprecated. Instead, the design is moving toward supporting **global logits
-  processors**, a feature the team is actively working on for future releases. See details at [RFC #13360](https://github.com/vllm-project/vllm/pull/13360).
+  feature has been removed. Instead, we now support **global logits processors**
+  which are set at startup time, see [RFC #17799](https://github.com/vllm-project/vllm/issues/17799).
 
-**KV Cache features**
+##### KV Cache features
 
 - **GPU <> CPU KV Cache Swapping**: with the new simplified core architecture, vLLM V1 no longer requires KV cache swapping
 to handle request preemptions.
 
-**Structured Output features**
+##### Structured Output features
 
-- **Request-level Structured Output Backend**: Deprecated, alternative backends
-  (outlines, guidance) with fallbacks is WIP.
-### Feature & Model Support in Progress
-
-Although we have re-implemented and partially optimized many features and models from V0 in vLLM V1, optimization work is still ongoing for some, and others remain unsupported.
-
-#### Features to Be Optimized
-
-These features are already supported in vLLM V1, but their optimization is still
-in progress.
-
-- **Spec Decode**: Currently, only ngram-based spec decode is supported in V1. There
-  will be follow-up work to support other types of spec decode (e.g., see [PR #13933](https://github.com/vllm-project/vllm/pull/13933)). We will prioritize the support for Eagle, MTP compared to draft model based spec decode.
-
-- **Multimodal Models**: V1 is almost fully compatible with V0 except that interleaved modality input is not supported yet.
-  See [here](https://github.com/orgs/vllm-project/projects/8) for the status of upcoming features and optimizations.
-
-#### Features to Be Supported
-
-- **Structured Output Alternative Backends**: Structured output alternative backends (outlines, guidance) support is planned. V1 currently
-  supports only the `xgrammar:no_fallback` mode, meaning that it will error out if the output schema is unsupported by xgrammar.
-  Details about the structured outputs can be found
-  [here](https://docs.vllm.ai/en/latest/features/structured_outputs.html).
-
-#### Models to Be Supported
-
-vLLM V1 currently excludes model architectures with the `SupportsV0Only` protocol,
-and the majority fall into the following categories. V1 support for these models will be added eventually.
-
-**Embedding Models**  
-The initial support will be provided by [PR #16188](https://github.com/vllm-project/vllm/pull/16188).
-
-Later, we will consider using [hidden states processor](https://github.com/vllm-project/vllm/issues/12249), which is based on [global logits processor](https://github.com/vllm-project/vllm/pull/13360) to enable simultaneous generation and embedding using the same engine instance in V1.
-
-**Mamba Models**  
-Models using selective state-space mechanisms (instead of standard transformer attention)
-are not yet supported (e.g., `MambaForCausalLM`, `JambaForCausalLM`).
-
-**Encoder-Decoder Models**  
-vLLM V1 is currently optimized for decoder-only transformers. Models requiring
-  cross-attention between separate encoder and decoder are not yet supported (e.g., `BartForConditionalGeneration`, `MllamaForConditionalGeneration`).
-
-For a complete list of supported models, see the [list of supported models](https://docs.vllm.ai/en/latest/models/supported_models.html).
+- **Request-level Structured Output Backend**: Removed; alternative backends (outlines, guidance) with fallbacks are supported now.

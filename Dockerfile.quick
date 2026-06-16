@@ -1,0 +1,45 @@
+ARG BASE_IMAGE=vllm/vllm-openai:v0.23.0-cu129
+FROM ${BASE_IMAGE}
+
+# Kaitakuai sampler-stack residual overlay on top of upstream vLLM 0.23.0.
+#
+# Six commits on this branch (poc-sampler-residual-v0.23) touch only Python
+# files inside the vllm/ package; no CUDA / .so rebuild is required. We
+# therefore overlay the modified .py files on top of the pre-built image
+# instead of recompiling from source. This mirrors the Stage-1 pattern used
+# by mb/feat/port-pocv2-vllm-0.23.0 (Dockerfile.quick) — see that branch
+# for the original rationale.
+#
+# Files touched by the residual stack:
+#   vllm/sampling_params.py
+#   vllm/v1/sample/sampler.py
+#   vllm/v1/sample/ops/topk_topp_sampler.py
+#   vllm/v1/structured_output/__init__.py
+#   vllm/v1/structured_output/backend_xgrammar.py
+#   vllm/v1/worker/gpu_input_batch.py
+#   vllm/v1/worker/gpu_model_runner.py
+#
+# We do not enumerate them in COPY directives; we use the find/tar pattern
+# from Stage 1 so adding a new file under vllm/ on this branch picks up
+# automatically.
+
+ENV VLLM_ALLOW_INSECURE_SERIALIZATION=1
+# NVFP4 on Blackwell (B200 / RTX PRO 6000) — enable FlashInfer MoE NVFP4
+# and FP8 fast paths. Harmless on non-NVFP4 models / non-Blackwell GPUs.
+ENV VLLM_USE_FLASHINFER_MOE_FP4=1
+ENV VLLM_USE_FLASHINFER_MOE_FP8=1
+
+RUN pip install --no-cache-dir scipy
+
+# Copy local code to temp location.
+COPY ./vllm /tmp/vllm-src
+
+# Merge only .py files into existing vllm package (preserves .so files).
+# Derive VLLM_DIR at build time so this works regardless of the base image's
+# Python version (3.12, 3.13, ...) or install layout (dist-packages vs
+# site-packages, virtualenv, etc.).
+RUN VLLM_DIR=$(python -c "import vllm, os; print(os.path.dirname(vllm.__file__))") \
+    && [ -d "$VLLM_DIR" ] || (echo "ERROR: vllm not importable"; exit 1) \
+    && cd /tmp/vllm-src \
+    && find . -name "*.py" | tar -cf - -T - | tar -xf - -C "$VLLM_DIR/" \
+    && rm -rf /tmp/vllm-src

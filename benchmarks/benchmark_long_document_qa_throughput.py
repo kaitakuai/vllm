@@ -40,13 +40,12 @@ LLM engine. You can refer to the `vllm.engine.arg_utils.EngineArgs` for more
 details.
 """
 
-import dataclasses
 import random
 import time
 
 from vllm import LLM, SamplingParams
 from vllm.engine.arg_utils import EngineArgs
-from vllm.utils import FlexibleArgumentParser
+from vllm.utils.argparse_utils import FlexibleArgumentParser
 
 
 def test_long_document_qa(llm=None, sampling_params=None, prompts=None):
@@ -124,7 +123,7 @@ def main(args):
 
     # Create the LLM engine
     engine_args = EngineArgs.from_cli_args(args)
-    llm = LLM(**dataclasses.asdict(engine_args))
+    llm = LLM.from_engine_args(engine_args)
     sampling_params = SamplingParams(temperature=0, max_tokens=args.output_len)
 
     print("------warm up------")
@@ -142,7 +141,7 @@ def main(args):
     )
 
 
-if __name__ == "__main__":
+def create_argument_parser():
     parser = FlexibleArgumentParser(
         description="Benchmark the performance with or "
         "without automatic prefix caching."
@@ -192,5 +191,11 @@ if __name__ == "__main__":
     )
 
     parser = EngineArgs.add_cli_args(parser)
+
+    return parser
+
+
+if __name__ == "__main__":
+    parser = create_argument_parser()
     args = parser.parse_args()
     main(args)
