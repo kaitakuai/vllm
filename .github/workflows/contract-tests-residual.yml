@@ -73,7 +73,7 @@ jobs:
           # `pip install -e .` requires torch BEFORE setup.py runs (vllm's
           # setup.py imports torch for CUDA detection) → ModuleNotFoundError
           # on a CPU-only runner. Workaround: install upstream wheel from
-          # PyPI (ships torch + compiled kernels), then copy our 7 patched
+          # PyPI (ships torch + compiled kernels), then copy our 8 patched
           # .py files OVER the installed vllm location. Contract tests are
           # pure read-only inspect — overlay is sufficient, no rebuild.
           pip install --upgrade pip
@@ -86,13 +86,17 @@ jobs:
           echo "Installed vllm at: $VLLM_INSTALL_DIR"
           [ -d "$VLLM_INSTALL_DIR" ] || { echo "ERROR: pip show vllm did not yield a valid Location"; exit 1; }
           # Explicit list — never silently overlay anything the contract
-          # didn't sign off on.
+          # didn't sign off on. Keep in sync with the residual diff
+          # (`git diff v0.23.0..poc-sampler-residual-v0.23 -- 'vllm/**/*.py'`);
+          # Dockerfile.quick uses a `find -name "*.py"` sweep over the same
+          # tree, so any new patched file MUST be added here too.
           for f in \
               vllm/sampling_params.py \
               vllm/v1/sample/metadata.py \
               vllm/v1/sample/sampler.py \
               vllm/v1/sample/ops/topk_topp_sampler.py \
               vllm/v1/worker/gpu_input_batch.py \
+              vllm/v1/worker/gpu_model_runner.py \
               vllm/v1/structured_output/__init__.py \
               vllm/v1/structured_output/backend_xgrammar.py; do
             rel=${f#vllm/}
@@ -177,6 +181,7 @@ jobs:
           echo "STAGE=$STAGE" >> "$GITHUB_ENV"
 
       - name: Run contract tests against upstream wheel
+        id: run
         # When this step fails: upstream drifted. Inspect the diff against
         # the surface assertions in tests/contract/test_sampler_surface.py
         # and update REBASE.md + the contract file before the next rebase.
