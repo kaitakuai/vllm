@@ -336,14 +336,19 @@ class TopKTopPSampler(nn.Module):
         generators: dict[int, torch.Generator],
         k: torch.Tensor | None,
         p: torch.Tensor | None,
+        need_processed_logprobs: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        if generators:
-            logger.warning_once(
-                "xpu kernel topk_topp_sampler does not support "
-                "per-request generators. Falling back to "
-                "PyTorch-native implementation."
+        if generators or need_processed_logprobs:
+            if generators:
+                logger.warning_once(
+                    "xpu kernel topk_topp_sampler does not support "
+                    "per-request generators. Falling back to "
+                    "PyTorch-native implementation."
+                )
+            return self.forward_native(
+                logits, generators, k, p,
+                need_processed_logprobs=need_processed_logprobs,
             )
-            return self.forward_native(logits, generators, k, p)
         random_sampled = torch.empty(
             logits.shape[0], dtype=torch.int64, device=logits.device
         )
