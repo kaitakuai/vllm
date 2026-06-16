@@ -67,17 +67,49 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Install residual fork (editable) + pytest
+      - name: Install upstream vllm + overlay residual patches
         run: |
           set -euo pipefail
-          # Editable install of THIS branch — the vllm package shadowed by
-          # our 6 sampler patches. We do NOT need CUDA / compiled kernels
-          # for read-only contract inspection.
-          VLLM_TARGET_DEVICE=cpu pip install --no-build-isolation -e . || \
-            VLLM_TARGET_DEVICE=empty pip install --no-build-isolation -e .
-          pip install pytest
+          # `pip install -e .` requires torch BEFORE setup.py runs (vllm's
+          # setup.py imports torch for CUDA detection) → ModuleNotFoundError
+          # on a CPU-only runner. Workaround: install upstream wheel from
+          # PyPI (ships torch + compiled kernels), then copy our 7 patched
+          # .py files OVER the installed vllm location. Contract tests are
+          # pure read-only inspect — overlay is sufficient, no rebuild.
+          pip install --upgrade pip
+          pip install vllm==0.23.0 pytest
+          VLLM_DIR=$(python -c "import os, vllm; print(os.path.dirname(vllm.__file__))")
+          echo "Installed vllm at: $VLLM_DIR"
+          # Explicit list — never silently overlay anything the contract
+          # didn't sign off on.
+          for f in \
+              vllm/sampling_params.py \
+              vllm/v1/sample/metadata.py \
+              vllm/v1/sample/sampler.py \
+              vllm/v1/sample/ops/topk_topp_sampler.py \
+              vllm/v1/worker/gpu_input_batch.py \
+              vllm/v1/structured_output/__init__.py \
+              vllm/v1/structured_output/backend_xgrammar.py; do
+            rel=${f#vllm/}
+            dst="$VLLM_DIR/$rel"
+            [ -f "$f" ] || { echo "ERROR: residual fork missing $f"; exit 1; }
+            [ -f "$dst" ] || { echo "ERROR: upstream vllm missing $dst — overlay target moved"; exit 1; }
+            cp -v "$f" "$dst"
+          done
 
-      - name: Run contract tests against in-fork wheel
+      - name: Sanity check — patched fields visible on overlaid wheel
+        run: |
+          python - <<'PY'
+          from vllm.sampling_params import SamplingParams
+          assert hasattr(SamplingParams, '__dataclass_fields__'), \
+              "SamplingParams stopped being a dataclass — upstream refactor"
+          fields = set(SamplingParams.__dataclass_fields__.keys())
+          assert 'logprobs_mode' in fields, "overlay missed logprobs_mode"
+          assert 'enforced_token_ids' in fields, "overlay missed enforced_token_ids"
+          print("overlay-sanity OK")
+          PY
+
+      - name: Run contract tests against overlaid vllm
         run: |
           pytest tests/contract -v --tb=short
 
