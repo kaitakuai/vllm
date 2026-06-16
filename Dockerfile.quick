@@ -35,6 +35,11 @@ RUN pip install --no-cache-dir scipy
 COPY ./vllm /tmp/vllm-src
 
 # Merge only .py files into existing vllm package (preserves .so files).
-RUN cd /tmp/vllm-src \
-    && find . -name "*.py" | tar -cf - -T - | tar -xf - -C /usr/local/lib/python3.12/dist-packages/vllm/ \
+# Derive VLLM_DIR at build time so this works regardless of the base image's
+# Python version (3.12, 3.13, ...) or install layout (dist-packages vs
+# site-packages, virtualenv, etc.).
+RUN VLLM_DIR=$(python -c "import vllm, os; print(os.path.dirname(vllm.__file__))") \
+    && [ -d "$VLLM_DIR" ] || (echo "ERROR: vllm not importable"; exit 1) \
+    && cd /tmp/vllm-src \
+    && find . -name "*.py" | tar -cf - -T - | tar -xf - -C "$VLLM_DIR/" \
     && rm -rf /tmp/vllm-src
