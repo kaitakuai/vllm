@@ -67,15 +67,24 @@ def test_sampling_params_has_poc_fields() -> None:
         "alert; expected on the upstream-drift job)."
     )
 
-    # Pin the __init__ accepts both kwargs; a future minor that keeps the
-    # annotation but drops the kwarg wiring would silently break callers.
-    sig = inspect.signature(cls.__init__)
-    init_params = set(sig.parameters)
+    # Pin the field is wired into the actual constructor surface, not just
+    # carried as a type annotation. msgspec.Struct (current shape of
+    # SamplingParams in vllm 0.23) auto-generates __init__ from
+    # __struct_fields__ but does NOT expose those names via
+    # inspect.signature(cls.__init__) — that returns (self, *args, **kwargs).
+    # Dataclasses use __dataclass_fields__. Try msgspec → dataclass → init
+    # signature in that order so the assertion survives future class-type
+    # flips upstream.
+    field_names = set(getattr(cls, "__struct_fields__", None) or [])
+    if not field_names:
+        field_names = set((getattr(cls, "__dataclass_fields__", None) or {}).keys())
+    if not field_names:
+        field_names = set(inspect.signature(cls.__init__).parameters)
     for name in ("logprobs_mode", "enforced_token_ids"):
-        assert name in init_params, (
-            f"SamplingParams.__init__ no longer accepts {name!r}; "
-            f"annotation present but kwarg wiring lost. "
-            f"Re-check commit 1c5368212 application."
+        assert name in field_names, (
+            f"SamplingParams: {name!r} not in constructor field set "
+            f"(__struct_fields__/__dataclass_fields__/__init__ signature). "
+            f"Annotation present but wiring lost — re-check commit 1c5368212."
         )
 
 
