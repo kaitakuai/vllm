@@ -78,8 +78,13 @@ jobs:
           # pure read-only inspect — overlay is sufficient, no rebuild.
           pip install --upgrade pip
           pip install vllm==0.23.0 pytest
-          VLLM_DIR=$(python -c "import os, vllm; print(os.path.dirname(vllm.__file__))")
-          echo "Installed vllm at: $VLLM_DIR"
+          # CWD = repo checkout which contains a vllm/ source dir; Python
+          # would import THAT instead of the installed wheel. Resolve the
+          # install location via pip metadata, NOT via `python -c "import
+          # vllm"`.
+          VLLM_INSTALL_DIR="$(pip show vllm | awk '/^Location:/{print $2}')/vllm"
+          echo "Installed vllm at: $VLLM_INSTALL_DIR"
+          [ -d "$VLLM_INSTALL_DIR" ] || { echo "ERROR: pip show vllm did not yield a valid Location"; exit 1; }
           # Explicit list — never silently overlay anything the contract
           # didn't sign off on.
           for f in \
@@ -91,14 +96,27 @@ jobs:
               vllm/v1/structured_output/__init__.py \
               vllm/v1/structured_output/backend_xgrammar.py; do
             rel=${f#vllm/}
-            dst="$VLLM_DIR/$rel"
+            dst="$VLLM_INSTALL_DIR/$rel"
             [ -f "$f" ] || { echo "ERROR: residual fork missing $f"; exit 1; }
             [ -f "$dst" ] || { echo "ERROR: upstream vllm missing $dst — overlay target moved"; exit 1; }
             cp -v "$f" "$dst"
           done
 
+      - name: Stage contract tests outside the working tree
+        # Same trick as upstream-drift: the cwd has a vllm/ source dir
+        # that shadows the installed (overlaid) wheel. Stage to a tempdir
+        # and run pytest from there so importlib resolves to site-packages.
+        run: |
+          set -euo pipefail
+          STAGE=$(mktemp -d)
+          cp -r tests/contract "$STAGE/contract"
+          : > "$STAGE/contract/conftest.py"
+          echo "STAGE=$STAGE" >> "$GITHUB_ENV"
+
       - name: Sanity check — patched fields visible on overlaid wheel
         run: |
+          set -euo pipefail
+          cd "$STAGE"
           python - <<'PY'
           from vllm.sampling_params import SamplingParams
           assert hasattr(SamplingParams, '__dataclass_fields__'), \
@@ -111,7 +129,9 @@ jobs:
 
       - name: Run contract tests against overlaid vllm
         run: |
-          pytest tests/contract -v --tb=short
+          set -euo pipefail
+          cd "$STAGE"
+          pytest contract -v --tb=short
 
   upstream-drift:
     name: upstream-drift (alert when upstream signature changes)
