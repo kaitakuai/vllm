@@ -51,7 +51,12 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.kv_cache_interface import AttentionSpec, KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -384,10 +389,100 @@ class Scheduler(SchedulerInterface):
 
         self.kv_cache_manager.new_step_starts()
 
+        # PoC decode (generation AND validation) runs step-driven and mixes with
+        # chat in the same forward. Pure dynamic KV: PoC allocates via the manager
+        # exactly like chat (no reservation / static blocks).
+        def _needs_pure_decode(r):
+            return False
+        poc_decode_pending = False
+        from vllm.poc.mixed_decode import (
+            decode_only_mixing_gate, poc_step_num_tokens, poc_alloc_footprint,
+            poc_share_budget,
+        )
+        # Cap the PoC batch to poc_max_batch_size; extra PoC requests defer.
+        poc_max_batch = self.cache_config.poc_max_batch_size
+        poc_scheduled = 0
+        # poc_share: PoC's slice of the step token budget; chat draws from the
+        # full budget (the chat<->PoC mix knob).
+        poc_token_budget = poc_share_budget(self.cache_config.poc_share, token_budget)
+        poc_tokens_scheduled = 0
+
+        # chat + PoC share a forward only when both decode; prefills run isolated.
+        poc_will_prefill = (
+            any(r.poc_params is not None and r.num_computed_tokens == 0
+                for r in self.running)
+            or any(r.poc_params is not None for r in self.waiting)
+            or any(r.poc_params is not None for r in self.skipped_waiting)
+        )
+        chat_will_prefill = (
+            any(r.poc_params is None
+                and r.num_computed_tokens < r.num_prompt_tokens
+                for r in self.running)
+            or any(r.poc_params is None for r in self.waiting)
+            or any(r.poc_params is None for r in self.skipped_waiting)
+        )
+        defer_chat, defer_poc, self._poc_consecutive_defers = decode_only_mixing_gate(
+            mixed_cudagraph=not self.vllm_config.model_config.enforce_eager,
+            poc_decode_pending=poc_decode_pending,
+            poc_will_prefill=poc_will_prefill,
+            chat_will_prefill=chat_will_prefill,
+            consecutive_defers=getattr(self, "_poc_consecutive_defers", 0),
+        )
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
             request = self.running[req_index]
+
+            # Defer chat on a PoC-exclusive step.
+            if defer_chat and request.poc_params is None:
+                req_index += 1
+                continue
+
+            # PoC: handle PoC requests specially.
+            if request.poc_params is not None:
+                # Keep PoC out of a chat-prefill step.
+                if defer_poc:
+                    req_index += 1
+                    continue
+                # Validation needs an exclusive pure batch; keep generation out.
+                if poc_decode_pending and not _needs_pure_decode(request):
+                    req_index += 1
+                    continue
+                # Prefill steps are exclusive among PoC: while any PoC prefills,
+                # defer PoC decodes so the prefill batch is a uniform N-prefill.
+                if poc_will_prefill and request.num_computed_tokens > 0:
+                    req_index += 1
+                    continue
+                # Cap the PoC batch; defer the rest.
+                if poc_scheduled >= poc_max_batch:
+                    req_index += 1
+                    continue
+                pp = request.poc_params
+                num_new_tokens = poc_step_num_tokens(
+                    pp, request.num_computed_tokens)
+                # poc_share cap: defer once PoC has used its slice of the budget.
+                if poc_tokens_scheduled + num_new_tokens > poc_token_budget:
+                    req_index += 1
+                    continue
+                if num_new_tokens <= token_budget:
+                    # Allocate real (paged) blocks via the manager, like chat.
+                    # None => no free blocks: PoC DEFERS (never preempts chat).
+                    poc_blocks = self.kv_cache_manager.allocate_slots(
+                        request, poc_alloc_footprint(pp, num_new_tokens),
+                        num_lookahead_tokens=self.num_lookahead_tokens,
+                    )
+                    if poc_blocks is None:
+                        req_index += 1
+                        continue
+                    req_to_new_blocks[request.request_id] = poc_blocks
+                    scheduled_running_reqs.append(request)
+                    num_scheduled_tokens[request.request_id] = num_new_tokens
+                    token_budget -= num_new_tokens
+                    poc_scheduled += 1
+                    poc_tokens_scheduled += num_new_tokens
+                req_index += 1
+                continue
 
             if (
                 request.num_output_placeholders > 0
@@ -577,6 +672,71 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+
+                # Defer chat on a PoC-exclusive step.
+                if defer_chat and request.poc_params is None:
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
+
+                # PoC: handle PoC requests.
+                if request.poc_params is not None:
+                    # Keep PoC out of a chat-prefill step.
+                    if defer_poc:
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
+                    # Validation needs an exclusive pure batch; keep generation out.
+                    if poc_decode_pending and not _needs_pure_decode(request):
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
+                    # Prefill steps are exclusive among PoC (see running loop).
+                    if poc_will_prefill and request.num_computed_tokens > 0:
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
+                    # Cap the PoC batch; defer extra PoC requests to the next step.
+                    if poc_scheduled >= poc_max_batch:
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
+                    _pp = request.poc_params
+                    num_new_tokens = poc_step_num_tokens(
+                        _pp, request.num_computed_tokens)
+                    # poc_share cap: defer once PoC has used its slice of the budget.
+                    if poc_tokens_scheduled + num_new_tokens > poc_token_budget:
+                        request_queue.pop_request()
+                        step_skipped_waiting.prepend_request(request)
+                        continue
+                    if num_new_tokens <= token_budget:
+                        # Allocate paged blocks via the manager; None => defer
+                        # (PoC waits, never preempts chat).
+                        poc_blocks = self.kv_cache_manager.allocate_slots(
+                            request, poc_alloc_footprint(_pp, num_new_tokens),
+                            num_lookahead_tokens=self.num_lookahead_tokens,
+                        )
+                        if poc_blocks is None:
+                            request_queue.pop_request()
+                            step_skipped_waiting.prepend_request(request)
+                            continue
+                        request_queue.pop_request()
+                        self.running.append(request)
+                        request.status = RequestStatus.RUNNING
+
+                        scheduled_new_reqs.append(request)
+                        num_scheduled_tokens[request.request_id] = num_new_tokens
+                        req_to_new_blocks[request.request_id] = poc_blocks
+                        token_budget -= num_new_tokens
+                        poc_scheduled += 1
+                        poc_tokens_scheduled += num_new_tokens
+
+                        if self.log_stats:
+                            request.record_event(
+                                EngineCoreEventType.SCHEDULED, scheduled_timestamp)
+                    else:
+                        break
+                    continue
 
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
@@ -936,6 +1096,11 @@ class Scheduler(SchedulerInterface):
             finished_req_ids=self.finished_req_ids,
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
+            poc_req_ids={req.request_id for req in
+                         itertools.chain(scheduled_new_reqs,
+                                         scheduled_resumed_reqs,
+                                         scheduled_running_reqs)
+                         if req.poc_params is not None},
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1357,6 +1522,50 @@ class Scheduler(SchedulerInterface):
                 # cache transfer in KV connector), the aborted request will not
                 # be set to None (in order to finish async KV transfer).
                 # In this case, we use is_finished() to check.
+                continue
+
+            # PoC: a decode-PoC request stays RUNNING across prefill +
+            # max_tokens decode steps; num_computed_tokens is advanced by
+            # _update_after_schedule. Emit nothing on intermediate steps; the
+            # runner accumulates the sphere_k trajectory and returns the full
+            # PoCOutput only on the final step. Finish + free here once the
+            # trajectory is complete.
+            if request.poc_params is not None:
+                pp = request.poc_params
+                if (pp.max_tokens > 0
+                        and request.num_computed_tokens
+                        < pp.seq_len + pp.max_tokens):
+                    continue
+                request.status = RequestStatus.FINISHED_STOPPED
+                self._free_request(request)
+                stopped_running_reqs.add(request)
+                poc_output: dict | None = {}  # empty = PoC ran but no artifacts
+                poc_outputs = getattr(model_runner_output, "poc_outputs", None)
+                if poc_outputs is not None:
+                    poc_obj = poc_outputs.get(req_id)
+                    if poc_obj is not None:
+                        poc_output = {
+                            "nonce": poc_obj.nonce,
+                            "vector_b64": poc_obj.vector_b64,
+                            "hidden_state_b64": poc_obj.hidden_state_b64,
+                            "reduced_hidden_state_b64": poc_obj.reduced_hidden_state_b64,
+                            "reduced_hidden_state_decode_b64": getattr(
+                                poc_obj, "reduced_hidden_state_decode_b64", []),
+                            "k_points_steps": getattr(poc_obj, "k_points_steps", []),
+                            "n_sphere_mismatches": getattr(
+                                poc_obj, "n_sphere_mismatches", -1),
+                            "sph_indices_steps": getattr(poc_obj, "sph_indices_steps", []),
+                            "sph_values_steps": getattr(poc_obj, "sph_values_steps", []),
+                        }
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=[],
+                        finish_reason=FinishReason.STOP,
+                        poc_output=poc_output,
+                        events=request.take_events(),
+                        trace_headers=request.trace_headers,
+                    ))
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]

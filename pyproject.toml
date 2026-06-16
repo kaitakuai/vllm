@@ -111,6 +111,7 @@ markers = [
     "distributed: run this test only in distributed GPU tests",
     "optional: optional tests that are automatically skipped, include --optional to run them",
 ]
+asyncio_mode = "auto"
 
 [tool.ty.src]
 respect-ignore-files = true

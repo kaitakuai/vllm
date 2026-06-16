@@ -669,6 +669,11 @@ class EngineArgs:
     kv_offloading_backend: KVOffloadingBackend = CacheConfig.kv_offloading_backend
     tokens_only: bool = False
 
+    poc_max_batch_size: int = get_field(CacheConfig, "poc_max_batch_size")
+    poc_seq_len: int = get_field(CacheConfig, "poc_seq_len")
+    poc_max_tokens: int = get_field(CacheConfig, "poc_max_tokens")
+    poc_share: float = get_field(CacheConfig, "poc_share")
+
     shutdown_timeout: int = 0
 
     weight_transfer_config: WeightTransferConfig | None = get_field(
@@ -1105,6 +1110,18 @@ class EngineArgs:
         )
         cache_group.add_argument(
             "--kv-offloading-backend", **cache_kwargs["kv_offloading_backend"]
+        )
+        cache_group.add_argument(
+            "--poc-max-batch-size", **cache_kwargs["poc_max_batch_size"]
+        )
+        cache_group.add_argument(
+            "--poc-seq-len", **cache_kwargs["poc_seq_len"]
+        )
+        cache_group.add_argument(
+            "--poc-max-tokens", **cache_kwargs["poc_max_tokens"]
+        )
+        cache_group.add_argument(
+            "--poc-share", **cache_kwargs["poc_share"]
         )
 
         # Model weight offload related configs
@@ -1667,6 +1684,10 @@ class EngineArgs:
             mamba_cache_mode=self.mamba_cache_mode,
             kv_offloading_size=self.kv_offloading_size,
             kv_offloading_backend=self.kv_offloading_backend,
+            poc_max_batch_size=self.poc_max_batch_size,
+            poc_seq_len=self.poc_seq_len,
+            poc_max_tokens=self.poc_max_tokens,
+            poc_share=self.poc_share,
         )
 
         # TurboQuant: auto-skip first/last 2 layers (boundary protection).

@@ -175,6 +175,23 @@ class CacheConfig:
     'native' (vLLM native CPU offloading), 'lmcache'.
     KV offloading is only activated when kv_offloading_size is set."""
 
+    poc_max_batch_size: int = Field(default=32, gt=0)
+    """Maximum number of PoC (Proof of Compute) nonces processed in a single
+    forward pass. Caps the per-step PoC batch; extra nonces defer."""
+
+    poc_seq_len: int = Field(default=256, gt=0)
+    """Input sequence length for PoC forward passes. Must match the seq_len
+    used in PoC generation requests."""
+
+    poc_max_tokens: int = Field(default=256, ge=0)
+    """Maximum number of decode steps per PoC nonce. Set to 0 when PoC runs
+    prefill-only."""
+
+    poc_share: float = Field(default=0.5, ge=0.0, le=1.0)
+    """Fraction of each scheduler step's token budget PoC may consume; chat gets
+    the rest. Explicit knob over the chat<->PoC mix: 1.0 = PoC greedy, 0.0 = chat
+    only (PoC paused), 0.5 = even split. Prevents PoC from starving chat."""
+
     def compute_hash(self) -> str:
         """
         WARNING: Whenever a new field is added to this config,
@@ -200,6 +217,11 @@ class CacheConfig:
             "user_specified_block_size",
             "user_specified_mamba_block_size",
             "_block_size_resolved",
+            # PoC batch/budget knobs — affect scheduling but not graph shape
+            "poc_max_batch_size",
+            "poc_seq_len",
+            "poc_max_tokens",
+            "poc_share",
             # Post-init/derived counters
             "num_gpu_blocks",
             "num_cpu_blocks",

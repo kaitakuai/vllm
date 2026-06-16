@@ -10,6 +10,7 @@ import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.poc.poc_params import PoCParams
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams, SamplingType
 from vllm.utils import length_from_prompt_token_ids_or_embeds
@@ -45,6 +46,7 @@ class CachedRequestState:
 
     lora_request: LoRARequest | None = None
     prompt_embeds: torch.Tensor | None = None
+    poc_params: PoCParams | None = None
 
     # Used when both async_scheduling and spec_decode are enabled.
     prev_num_draft_len: int = 0
@@ -260,6 +262,7 @@ class InputBatch:
         self.logits_processing_needs_token_ids = np.zeros(max_num_reqs, dtype=bool)
 
         self.req_output_token_ids: list[list[int] | None] = []
+        self.req_enforced_token_ids: dict[str, list[int] | None] = {}
 
         # Store provided logitsprocs. If none are provided, initialize empty
         # data structure
@@ -324,13 +327,20 @@ class InputBatch:
         req_index = self._register_add_request(request)
 
         req_id = request.req_id
+        enforced = getattr(
+            request.sampling_params, 'enforced_token_ids', None
+        ) if request.sampling_params else None
         if req_index == len(self._req_ids):
             self._req_ids.append(req_id)
             self.req_output_token_ids.append(request.output_token_ids)
+            if enforced:
+                self.req_enforced_token_ids[req_id] = enforced
             self.spec_token_ids.append([])
         else:
             self._req_ids[req_index] = req_id
             self.req_output_token_ids[req_index] = request.output_token_ids
+            if enforced:
+                self.req_enforced_token_ids[req_id] = enforced
             self.spec_token_ids[req_index].clear()
 
         self.req_id_to_index[req_id] = req_index
@@ -439,6 +449,8 @@ class InputBatch:
             self.logits_processing_needs_token_ids[req_index] = (
                 pooling_params.requires_token_ids
             )
+        elif request.poc_params is not None:
+            pass
         else:
             raise NotImplementedError("Unrecognized request type")
 
@@ -503,6 +515,7 @@ class InputBatch:
         self.batch_update_builder.removed_append(req_index)
         self._req_ids[req_index] = None
         self.req_output_token_ids[req_index] = None
+        self.req_enforced_token_ids.pop(req_id, None)
         self.spec_token_ids[req_index].clear()
         self.block_table.clear_row(req_index)
 
@@ -787,6 +800,39 @@ class InputBatch:
         del self.req_output_token_ids[num_reqs:]
         del self.spec_token_ids[num_reqs:]
 
+    def _build_enforced_tensor(self) -> "torch.Tensor | None":
+        """Build enforced_next_token_ids tensor from current batch state.
+
+        Returns None if no requests have enforced tokens.
+        Shape [num_reqs], -1 means no enforcement for that request.
+        """
+        num_reqs = self.num_reqs
+        if num_reqs == 0 or not self.req_enforced_token_ids:
+            return None
+        enforced_list = []
+        has_any = False
+        for i in range(num_reqs):
+            etids = self.req_enforced_token_ids.get(self._req_ids[i])
+            if etids:
+                out_len = len(self.req_output_token_ids[i]) if self.req_output_token_ids[i] else 0
+                enforced_list.append(
+                    etids[out_len] if out_len < len(etids) else etids[-1]
+                )
+                has_any = True
+            else:
+                enforced_list.append(-1)
+        if not has_any:
+            return None
+        return torch.tensor(enforced_list, dtype=torch.long, device=self.device)
+
+    def _update_enforced_tensor(self):
+        """Update enforced_next_token_ids on sampling_metadata each step."""
+        if self.sampling_metadata is None:
+            return
+        self.sampling_metadata.enforced_next_token_ids = (
+            self._build_enforced_tensor()
+        )
+
     def refresh_metadata(self):
         """Apply any batch updates to sampling metadata."""
 
@@ -804,6 +850,9 @@ class InputBatch:
             logit_proc.update_state(batch_update)
         if batch_update:
             self.sampling_metadata = self._make_sampling_metadata()
+        # Always update enforced tokens (they advance each step)
+        if self.req_enforced_token_ids:
+            self._update_enforced_tensor()
 
     def _make_sampling_metadata(self) -> SamplingMetadata:
         num_reqs = self.num_reqs
@@ -902,6 +951,7 @@ class InputBatch:
             allowed_token_ids_mask=allowed_token_ids_mask,
             bad_words_token_ids=self.bad_words_token_ids,
             logitsprocs=self.logitsprocs,
+            enforced_next_token_ids=self._build_enforced_tensor(),
         )
 
     def get_pooling_params(self) -> list[PoolingParams]:

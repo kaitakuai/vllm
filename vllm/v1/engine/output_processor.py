@@ -232,6 +232,16 @@ class RequestState:
             top_p = sampling_params.top_p
             n = sampling_params.n
             temperature = sampling_params.temperature
+        elif request.poc_params is not None:
+            # PoC requests carry neither sampling nor pooling params; they emit a
+            # single final RequestOutput (poc_output) produced by the runner.
+            logprobs_processor = None
+            detokenizer = None
+            max_tokens_param = None
+            top_p = None
+            n = None
+            temperature = None
+            output_kind = RequestOutputKind.FINAL_ONLY
         else:
             logprobs_processor = None
             detokenizer = None
@@ -613,6 +623,7 @@ class OutputProcessor:
 
             new_token_ids = engine_core_output.new_token_ids
             pooling_output = engine_core_output.pooling_output
+            poc_output = engine_core_output.poc_output
             finish_reason = engine_core_output.finish_reason
             stop_reason = engine_core_output.stop_reason
             kv_transfer_params = engine_core_output.kv_transfer_params
@@ -624,6 +635,25 @@ class OutputProcessor:
                         engine_core_output.prefill_stats.num_cached_tokens
                     )
                 req_state.is_prefilling = False
+
+            if poc_output is not None:
+                request_output = RequestOutput(
+                    request_id=req_id,
+                    prompt=None,
+                    prompt_token_ids=[],
+                    prompt_logprobs=None,
+                    outputs=[],
+                    finished=True,
+                    poc_output=poc_output,
+                )
+                if req_state.queue is not None:
+                    req_state.queue.put(request_output)
+                else:
+                    request_outputs.append(request_output)
+
+                # Free the request
+                self.request_states.pop(req_id)
+                continue
 
             if pooling_output is None:
                 assert req_state.detokenizer is not None

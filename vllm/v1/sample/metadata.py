@@ -47,3 +47,7 @@ class SamplingMetadata:
 
     # Speculative token ids
     spec_token_ids: list[list[int]] | None = None
+
+    # Enforced next token ids (PoC validation replay).
+    # Shape [num_reqs], -1 means no enforcement for that request.
+    enforced_next_token_ids: torch.Tensor | None = None

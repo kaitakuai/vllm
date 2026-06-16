@@ -26,6 +26,7 @@ from vllm.logger import init_logger
 from vllm.lora.request import LoRARequest
 from vllm.multimodal import MULTIMODAL_REGISTRY, MultiModalRegistry
 from vllm.outputs import STREAM_FINISHED, PoolingRequestOutput, RequestOutput
+from vllm.poc.poc_params import PoCParams
 from vllm.pooling_params import PoolingParams
 from vllm.renderers import renderer_from_config
 from vllm.renderers.inputs.preprocess import extract_prompt_components
@@ -293,11 +294,45 @@ class AsyncLLM(EngineClient):
         data_parallel_rank: int | None = None,
         prompt_text: str | None = None,
         reasoning_ended: bool | None = None,
+        poc_params: PoCParams | None = None,
     ) -> RequestOutputCollector:
         """Add new request to the AsyncLLM."""
 
         if self.errored:
             raise EngineDeadError()
+
+        if poc_params is not None:
+            queue = RequestOutputCollector(
+                output_kind=RequestOutputKind.FINAL_ONLY,
+                request_id=request_id,
+            )
+
+            if arrival_time is None:
+                arrival_time = time.time()
+
+            request = EngineCoreRequest(
+                request_id=request_id,
+                # Dummy tokens (seq_len) so PoC rides the graphed input_ids path;
+                # the real PoC embeds are injected by PoCEmbeddingWrapper.
+                prompt_token_ids=[0] * poc_params.seq_len,
+                mm_features=None,
+                sampling_params=None,
+                pooling_params=None,
+                arrival_time=arrival_time,
+                lora_request=lora_request,
+                cache_salt=None,
+                data_parallel_rank=data_parallel_rank,
+                priority=priority,
+                poc_params=poc_params,
+                # PoC builds EngineCoreRequest directly (bypassing the input
+                # processor's assign_request_id), so set external_req_id here.
+                # request_id is already a unique poc-<uuid>.
+                external_req_id=request_id,
+            )
+
+            self._run_output_handler()
+            await self._add_request(request, None, None, 0, queue)
+            return queue
 
         is_pooling = isinstance(params, PoolingParams)
 
@@ -523,9 +558,10 @@ class AsyncLLM(EngineClient):
         prompt: EngineCoreRequest
         | PromptType
         | EngineInput
-        | AsyncGenerator[StreamingInput, None],
-        sampling_params: SamplingParams,
-        request_id: str,
+        | AsyncGenerator[StreamingInput, None]
+        | None = None,
+        sampling_params: SamplingParams | None = None,
+        request_id: str | None = None,
         *,
         prompt_text: str | None = None,
         lora_request: LoRARequest | None = None,
@@ -534,6 +570,7 @@ class AsyncLLM(EngineClient):
         priority: int = 0,
         data_parallel_rank: int | None = None,
         reasoning_ended: bool | None = None,
+        poc_params: PoCParams | None = None,
     ) -> AsyncGenerator[RequestOutput, None]:
         """
         Main function called by the API server to kick off a request
@@ -550,6 +587,20 @@ class AsyncLLM(EngineClient):
         returning the RequestOutput back to the caller.
         """
 
+        if poc_params is not None:
+            if sampling_params is not None or prompt is not None:
+                raise ValueError(
+                    "poc_params cannot be used with sampling_params or prompt")
+            # For PoC requests, we don't need sampling params or prompt;
+            # the request is handled specially by the scheduler.
+            if request_id is None:
+                import uuid
+                request_id = f"poc-{uuid.uuid4()}"
+        else:
+            if sampling_params is None or prompt is None:
+                raise ValueError(
+                    "sampling_params and prompt are required for non-PoC requests")
+
         q: RequestOutputCollector | None = None
         try:
             q = await self.add_request(
@@ -563,6 +614,7 @@ class AsyncLLM(EngineClient):
                 data_parallel_rank=data_parallel_rank,
                 prompt_text=prompt_text,
                 reasoning_ended=reasoning_ended,
+                poc_params=poc_params,
             )
 
             # The output_handler task pushes items into the queue.

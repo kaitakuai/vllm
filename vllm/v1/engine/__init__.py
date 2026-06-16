@@ -13,6 +13,7 @@ import torch
 
 from vllm.lora.request import LoRARequest
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.poc.poc_params import PoCParams
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.v1.metrics.stats import PrefillStats, SchedulerStats
@@ -93,6 +94,7 @@ class EngineCoreRequest(
     cache_salt: str | None
     data_parallel_rank: int | None
     prompt_embeds: torch.Tensor | None = None
+    poc_params: PoCParams | None = None
 
     # Index of the client, used to ensure outputs are sent back to the same
     # client for this request when scaling out the front-end.
@@ -175,6 +177,8 @@ class EngineCoreOutput(
     prefill_stats: PrefillStats | None = None
 
     routed_experts: np.ndarray | None = None
+    # PoC: Output for PoC requests (nonce, vector_b64)
+    poc_output: dict[str, Any] | None = None
     # The number of NaNs in logits.
     # A value greater than 0 indicates that the output is corrupted.
     num_nans_in_logits: int = 0

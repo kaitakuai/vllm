@@ -252,6 +252,16 @@ def build_app(
 
         register_pooling_api_routers(app, supported_tasks, model_config)
 
+    from vllm.poc.routes import router as poc_router
+
+    app.include_router(poc_router)
+    app.state.poc_enabled = True
+    app.state.poc_decode = getattr(args, "poc_decode", False)
+    logger.info(
+        "PoC (Proof of Compute) API enabled%s",
+        " [decode default ON]" if app.state.poc_decode else "",
+    )
+
     app.root_path = args.root_path
     app.add_middleware(
         CORSMiddleware,
@@ -425,8 +435,12 @@ async def init_app_state(
 
         init_pooling_state(engine_client, state, args, request_logger, supported_tasks)
 
-    state.enable_server_load_tracking = args.enable_server_load_tracking
+    # Auto-enable when PoC is enabled (for blocking mode support)
+    state.enable_server_load_tracking = args.enable_server_load_tracking or getattr(
+        state, "poc_enabled", False
+    )
     state.server_load_metrics = 0
+    state.poc_exclusive_mode = False
 
 
 async def init_render_app_state(

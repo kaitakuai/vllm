@@ -14,7 +14,7 @@ from vllm.entrypoints.openai.chat_completion.protocol import (
     ChatCompletionResponse,
 )
 from vllm.entrypoints.openai.chat_completion.serving import OpenAIServingChat
-from vllm.entrypoints.openai.engine.protocol import ErrorResponse
+from vllm.entrypoints.openai.engine.protocol import ErrorInfo, ErrorResponse
 from vllm.entrypoints.openai.orca_metrics import metrics_header
 from vllm.entrypoints.openai.utils import validate_json_request
 from vllm.entrypoints.utils import (
@@ -51,6 +51,26 @@ def batch_chat(request: Request) -> OpenAIServingChatBatch | None:
 @with_cancellation
 @load_aware_call
 async def create_chat_completion(request: ChatCompletionRequest, raw_request: Request):
+    # Chat priority gating: reject inference while PoC generation is active
+    # to prevent GPU contention / NCCL deadlocks.
+    try:
+        from vllm.poc.routes import is_poc_generation_active
+
+        if is_poc_generation_active():
+            return JSONResponse(
+                status_code=HTTPStatus.SERVICE_UNAVAILABLE.value,
+                content=ErrorResponse(
+                    error=ErrorInfo(
+                        message="PoC generation is active. Inference requests "
+                        "are temporarily unavailable.",
+                        type="service_unavailable",
+                        code=HTTPStatus.SERVICE_UNAVAILABLE.value,
+                    ),
+                ).model_dump(),
+            )
+    except ImportError:
+        pass
+
     metrics_header_format = raw_request.headers.get(
         ENDPOINT_LOAD_METRICS_FORMAT_HEADER_LABEL, ""
     )

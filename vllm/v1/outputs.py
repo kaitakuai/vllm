@@ -115,6 +115,30 @@ PoolerOutput: TypeAlias = torch.Tensor | list[torch.Tensor] | list[torch.Tensor 
 
 
 @dataclass
+class PoCOutput:
+    nonce: int
+    vector_b64: str
+    # Optional – populated only when the runner is asked to expose internals
+    hidden_state_b64: str | None = None           # full normalised last-token hidden state
+    reduced_hidden_state_b64: str | None = None   # SPHERE_DIM-D slice on unit sphere (prefill)
+    reduced_hidden_state_decode_b64: list[str] = field(default_factory=list)  # per decode step
+    # Decode-mode statistics: sphere_k chosen at each step (the codebook index on
+    # the sphere). Index 0 = prefill, indices 1..N = decode steps. The prefill k is
+    # k_points_steps[0] (the dropped scalar sphere_k field was just this).
+    # Empty when poc_decode is disabled.
+    k_points_steps: list[int] = field(default_factory=list)
+    # Validation mode only: number of steps where the locally computed k-id
+    # differed from the reference inference k-id.  -1 for inference requests.
+    n_sphere_mismatches: int = -1
+    # Debug mode (debug=True in request): per-step sphere slice indices and
+    # values.  Index 0 = prefill, 1..N = decode steps.
+    # sph_indices_steps[step] : list of SPHERE_DIM int indices into hidden state
+    # sph_values_steps[step]  : base64-encoded float16 array of gathered values
+    sph_indices_steps: list[list[int]] = field(default_factory=list)
+    sph_values_steps: list[str] = field(default_factory=list)
+
+
+@dataclass
 class SamplerOutput:
     # [num_reqs, max_num_generated_tokens]
     # Different requests can have different number of generated tokens.
@@ -200,6 +224,9 @@ class ModelRunnerOutput:
 
     # information related to cudagraph execution
     cudagraph_stats: CUDAGraphStat | None = None
+
+    # PoC: req_id -> PoCOutput
+    poc_outputs: dict[str, PoCOutput] | None = None
 
 
 # ModelRunnerOutput wrapper for async scheduling.

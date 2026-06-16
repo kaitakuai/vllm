@@ -103,6 +103,13 @@ class Sampler(nn.Module):
         # return int32 (while PyTorch argmax and topk return int64).
         sampled = sampled.long()
 
+        # Override with enforced token ids where specified (PoC validation replay).
+        if sampling_metadata.enforced_next_token_ids is not None:
+            enforced = sampling_metadata.enforced_next_token_ids
+            mask = enforced != -1
+            if mask.any():
+                sampled[mask] = enforced[mask]
+
         # Handle logprob_token_ids if specified (more efficient than full vocab)
         # This is used by generative_scoring API to get logprobs for specific tokens
         logprob_token_ids_tensors = None

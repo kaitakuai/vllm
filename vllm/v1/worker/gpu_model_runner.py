@@ -202,6 +202,8 @@ from vllm.v1.worker.ubatch_utils import (
 from vllm.v1.worker.utils import is_residual_scattered_for_sp
 from vllm.v1.worker.workspace import lock_workspace
 
+from vllm.poc import mixed_decode
+
 from .utils import (
     AttentionGroup,
     KVBlockZeroer,
@@ -389,6 +391,7 @@ class ExecuteModelState(NamedTuple):
     ec_connector_output: ECConnectorOutput | None
     cudagraph_stats: CUDAGraphStat | None
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
+    mixed_batch_info: dict | None = None
 
 
 class GPUModelRunner(
@@ -854,6 +857,8 @@ class GPUModelRunner(
         # Ephemeral state transferred between execute_model() and sample_tokens().
         self.execute_model_state: ExecuteModelState | None = None
         self.kv_connector_output: KVConnectorOutput | None = None
+        # Direct output for pure-PoC batches that bypass execute_model_state.
+        self._poc_direct_output: ModelRunnerOutput | None = None
         self.mamba_state_idx: dict[str, int] = {}
         self._mamba_copy_bufs: mamba_utils.MambaCopyBuffers | None = None
         self.layerwise_nvtx_hooks_registered = False
@@ -1167,6 +1172,7 @@ class GPUModelRunner(
                 num_computed_tokens=new_req_data.num_computed_tokens,
                 output_token_ids=[],
                 lora_request=new_req_data.lora_request,
+                poc_params=new_req_data.poc_params,
             )
             self.requests[req_id] = req_state
             self.late_interaction_runner.register_request(req_id, pooling_params)
@@ -3326,6 +3332,50 @@ class GPUModelRunner(
             ec_connector_output,
         )
 
+    def _compute_logits_with_poc_filter(
+            self,
+            sample_hidden_states: torch.Tensor,
+    ) -> torch.Tensor:
+        mixed_batch_info = getattr(self, '_mixed_batch_info', None)
+        if not (mixed_batch_info and mixed_batch_info.get('poc_req_ids')):
+            return self.model.compute_logits(sample_hidden_states)
+
+        poc_req_ids = mixed_batch_info['poc_req_ids']
+        req_ids = mixed_batch_info.get('req_ids_snapshot', self.input_batch.req_ids)
+        num_reqs = len(req_ids)
+        num_samples = sample_hidden_states.shape[0]
+
+        if num_samples != num_reqs:
+            logger.warning(
+                f"PoC logits filter: sample_hidden_states={num_samples} "
+                f"!= num_reqs={num_reqs}, skipping filter"
+            )
+            return self.model.compute_logits(sample_hidden_states)
+
+        chat_mask = torch.tensor(
+            [req_id not in poc_req_ids for req_id in req_ids[:num_reqs]],
+            dtype=torch.bool,
+            device=sample_hidden_states.device
+        )
+
+        if chat_mask.any():
+            chat_hidden_states = sample_hidden_states[chat_mask]
+            chat_logits = self.model.compute_logits(chat_hidden_states)
+            logits = torch.zeros(
+                (num_reqs, chat_logits.shape[-1]),
+                dtype=chat_logits.dtype,
+                device=chat_logits.device
+            )
+            logits[chat_mask] = chat_logits
+            return logits
+
+        vocab_size = self.model_config.get_vocab_size()
+        return torch.zeros(
+            (num_reqs, vocab_size),
+            dtype=sample_hidden_states.dtype,
+            device=sample_hidden_states.device
+        )
+
     def _sample(
         self,
         logits: torch.Tensor | None,
@@ -3333,14 +3383,56 @@ class GPUModelRunner(
     ) -> SamplerOutput:
         # Sample the next token and get logprobs if needed.
         sampling_metadata = self.input_batch.sampling_metadata
+
+        # Filter out PoC requests from sampling
+        mixed_batch_info = getattr(self, '_mixed_batch_info', None)
+        chat_mask = None
+        chat_indices = None
+        num_total_reqs = logits.shape[0] if logits is not None else 0
+
+        if mixed_batch_info and mixed_batch_info.get('poc_req_ids') and logits is not None:
+            poc_req_ids = mixed_batch_info['poc_req_ids']
+            req_ids = mixed_batch_info.get('req_ids_snapshot', self.input_batch.req_ids)
+
+            # Create mask for chat requests
+            chat_indices = [i for i, req_id in enumerate(req_ids) if req_id not in poc_req_ids]
+
+            # All-PoC batch (no chat): skip the sampler entirely (empty batch
+            # trips its all_greedy/all_random assert, and there are no chat rows
+            # to filter); PoC emits vectors, not tokens.
+            if len(chat_indices) == 0:
+                return SamplerOutput(
+                    sampled_token_ids=torch.zeros(
+                        (num_total_reqs, 1), dtype=torch.long, device=self.device),
+                    logprobs_tensors=None,
+                )
+            # Mixed batch (some chat + some PoC): filter PoC rows out of sampling.
+            if len(chat_indices) < len(req_ids):
+                chat_mask = torch.tensor(
+                    [req_id not in poc_req_ids for req_id in req_ids],
+                    dtype=torch.bool,
+                    device=logits.device
+                )
+                logits = logits[chat_mask]
+                sampling_metadata = mixed_decode.filter_sampling_metadata_for_chat(
+                    sampling_metadata, chat_mask, chat_indices
+                )
+
         # Update output token ids with tokens sampled in last step
         # if async scheduling and required by current sampling params.
         self.input_batch.update_async_output_token_ids()
         if spec_decode_metadata is None:
-            return self.sampler(
+            sampler_output = self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
+
+            if chat_mask is not None and chat_indices is not None:
+                sampler_output = mixed_decode.expand_sampler_output_for_poc(
+                    sampler_output, chat_mask, chat_indices, num_total_reqs
+                )
+
+            return sampler_output
 
         # Update spec_token_ids with real draft tokens from pre step only when
         # output_token_ids is needed (penalties or bad_words are in use).
@@ -3471,6 +3563,23 @@ class GPUModelRunner(
             hidden_states[:num_scheduled_tokens],
             scheduler_output.num_scheduled_tokens,
         )
+
+        # Filter PoC requests out of output arrays so indices stay consistent.
+        mixed_batch_info = getattr(self, '_mixed_batch_info', None)
+        if mixed_batch_info and mixed_batch_info.get('poc_req_ids'):
+            poc_req_ids = mixed_batch_info['poc_req_ids']
+            chat_indices = [
+                i for i, rid in enumerate(req_ids_output_copy)
+                if rid not in poc_req_ids
+            ]
+            req_ids_output_copy = [req_ids_output_copy[i] for i in chat_indices]
+            req_id_to_index_output_copy = {
+                rid: new_i for new_i, rid in enumerate(req_ids_output_copy)
+            }
+            if valid_sampled_token_ids:
+                valid_sampled_token_ids = [
+                    valid_sampled_token_ids[i] for i in chat_indices
+                ]
 
         return (
             num_nans_in_logits,
@@ -3832,6 +3941,55 @@ class GPUModelRunner(
             # Update persistent batch states.
             deferred_state_corrections_fn = self._update_states(scheduler_output)
 
+            poc_req_ids = scheduler_output.poc_req_ids
+            has_poc_requests = bool(poc_req_ids)
+
+            if has_poc_requests:
+                # Sort by nonce to ensure consistent ordering across all PP
+                # ranks. Each PP rank runs in a separate process with a
+                # different PYTHONHASHSEED, so iterating poc_req_ids (a set)
+                # produces different orderings per rank. Without sorting,
+                # rank 0 generates inputs for nonces in one order while rank
+                # 1 assigns output vectors in a different order, causing
+                # every nonce to receive the wrong vector.
+                poc_requests = sorted(
+                    [
+                        self.requests[req_id] for req_id in poc_req_ids
+                        if req_id in self.requests
+                    ],
+                    key=lambda req: req.poc_params.nonce,
+                )
+
+                scheduled_req_ids = set(scheduler_output.num_scheduled_tokens.keys())
+                chat_requests = [
+                    req for req_id, req in self.requests.items()
+                    if req_id not in poc_req_ids and req_id in scheduled_req_ids
+                ]
+                # All PoC (prefill-only or decode) runs the native path; "mixed"
+                # here means "the batch contains PoC rows" (chat may or may not be
+                # present too).
+                is_mixed_batch = bool(poc_requests)
+
+                logger.debug(f"Batch detection: poc_reqs={len(poc_requests)}, "
+                            f"chat_reqs={len(chat_requests)}, mixed={is_mixed_batch}")
+            else:
+                poc_requests = []
+                chat_requests = list(self.requests.values())
+                is_mixed_batch = False
+
+            # Set up per-request decode state for decode-PoC (max_tokens > 0).
+            if poc_requests:
+                mixed_decode.setup_decode_poc(self, poc_requests)
+
+            self._mixed_batch_info = {
+                'is_mixed': is_mixed_batch,
+                'poc_requests': poc_requests,
+                'chat_requests': chat_requests,
+                'poc_req_ids': poc_req_ids,
+                'req_ids_snapshot': list(self.input_batch.req_ids),
+                'num_reqs_snapshot': self.input_batch.num_reqs,
+            } if is_mixed_batch else None
+
             if has_ec_transfer() and not get_ec_transfer().is_consumer:
                 with self.maybe_get_ec_connector_output(
                     scheduler_output,
@@ -4010,6 +4168,60 @@ class GPUModelRunner(
                 scheduler_output, num_tokens_padded, intermediate_tensors
             )
 
+            # Mixed batch: build unified chat+PoC inputs in input_batch.req_ids
+            # order so the embeddings line up with _prepare_inputs' slot_mapping.
+            poc_position_mask = None
+            poc_metadata = None
+
+            if is_mixed_batch and poc_req_ids and get_pp_group().is_first_rank:
+                logger.info(f"MIXED BATCH: {num_scheduled_tokens} total tokens, "
+                           f"{len(poc_req_ids)} PoC requests - preserving scheduler order")
+                (
+                    unified_embeds,
+                    unified_positions,
+                    poc_position_mask,
+                    poc_metadata,
+                ) = mixed_decode.build_unified_mixed_batch_inputs(
+                    self,
+                    scheduler_output=scheduler_output,
+                    chat_input_ids=input_ids,
+                    chat_inputs_embeds=inputs_embeds,
+                    chat_positions=positions,
+                    poc_req_ids=poc_req_ids,
+                    num_total_tokens=num_scheduled_tokens,
+                )
+
+                if unified_embeds is not None and getattr(self, "_poc_native", None):
+                    # Native path: inject PoC embeds via the embedding wrapper on the
+                    # graphed input_ids path. Write the per-row PoC embeds + mask +
+                    # reflection vectors into the native buffers; keep the dummy
+                    # input_ids (do NOT switch to inputs_embeds, which isn't graphed).
+                    self._poc_native.set_embeds(unified_embeds)
+                    self._poc_native.set_mask(poc_position_mask)
+                    if poc_metadata:
+                        # Per-row block_hash: each PoC request's rows reflect with
+                        # ITS OWN block's vectors, so different-block_hash requests
+                        # can share one forward without contaminating each other.
+                        row_hashes = [None] * unified_embeds.shape[0]
+                        for meta in poc_metadata:
+                            bh = meta['poc_params'].block_hash
+                            s = meta['start_idx']
+                            for r in range(s, s + meta['length']):
+                                if r < len(row_hashes):
+                                    row_hashes[r] = bh
+                        self._poc_native.set_row_block_hashes(row_hashes)
+                    self._mixed_batch_info['poc_metadata'] = poc_metadata
+                    self._mixed_batch_info['poc_position_mask'] = poc_position_mask
+
+            # In eager mode, force_eager already made cudagraph_mode NONE for PoC
+            # batches; assert it rather than override late (a late override leaves
+            # metadata padded to a graph size).
+            if poc_position_mask is not None and self.model_config.enforce_eager:
+                assert cudagraph_mode == CUDAGraphMode.NONE, (
+                    "PoC batch must be eager under enforce_eager, "
+                    f"got {cudagraph_mode}"
+                )
+
         # Set cudagraph mode to none if calc_kv_scales is true.
         # KV scales calculation involves dynamic operations that are incompatible
         # with CUDA graph capture.
@@ -4030,6 +4242,14 @@ class GPUModelRunner(
         # When spec decode is enabled, defer connector finalization
         # (wait_for_save + clear metadata) until after draft model runs.
         defer_kv_connector_finalize = self.speculative_config is not None
+        # PoC: drive the NATIVE inline transform (baked into the model via
+        # PoCLayerWrapper) — set the per-round reflection vectors + the per-row
+        # mask buffer. No forward-hook, no manual capture: the transform rides the
+        # normal forward (and, with cudagraph on, the native graph).
+        # Chat-only forward: clear the PoC mask so the wrapped layers/embedding are
+        # identity (PoC batches set it in input-prep above).
+        if getattr(self, "_poc_native", None) is not None and poc_position_mask is None:
+            self._poc_native.set_mask(None)
         with (
             set_forward_context(
                 attn_metadata,
@@ -4084,7 +4304,7 @@ class GPUModelRunner(
                     )
 
                 sample_hidden_states = hidden_states[logits_indices]
-                logits = self.model.compute_logits(sample_hidden_states)
+                logits = self._compute_logits_with_poc_filter(sample_hidden_states)
             else:
                 # Rare case.
                 assert not self.is_pooling_model
@@ -4103,7 +4323,7 @@ class GPUModelRunner(
                     )
                     logits = None
                 else:
-                    logits = self.model.compute_logits(sample_hidden_states)
+                    logits = self._compute_logits_with_poc_filter(sample_hidden_states)
 
                 model_output_broadcast_data: dict[str, Any] = {}
                 if logits is not None:
@@ -4126,6 +4346,7 @@ class GPUModelRunner(
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
+            mixed_batch_info=getattr(self, '_mixed_batch_info', None),
         )
         self.kv_connector_output = kv_connector_output
 
@@ -4143,6 +4364,13 @@ class GPUModelRunner(
         if self.execute_model_state is None:
             kv_connector_output = self.kv_connector_output
             self.kv_connector_output = None
+            # Pure-PoC batch: execute_model() returned the output directly and
+            # stored it here. Return it so step_with_batch_queue gets a non-None
+            # model_output instead of hitting RuntimeError("unexpected error").
+            poc_out = self._poc_direct_output
+            if poc_out is not None:
+                self._poc_direct_output = None
+                return poc_out
             # receive sampled token ids from the last PP rank.
             if self.use_async_scheduling and get_pp_group().world_size > 1:
                 self._pp_receive_prev_sampled_token_ids_to_input_batch()
@@ -4170,9 +4398,11 @@ class GPUModelRunner(
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
+            mixed_batch_info,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
+        self._mixed_batch_info = mixed_batch_info
 
         # Apply structured output bitmasks if present.
         if grammar_output is not None:
@@ -4323,6 +4553,36 @@ class GPUModelRunner(
         with record_function_or_nullcontext("gpu_model_runner: eplb"):
             self.eplb_step()
 
+        poc_outputs_dict = None
+        if mixed_batch_info:
+            if mixed_batch_info.get('poc_outputs'):
+                poc_outputs_dict = mixed_batch_info['poc_outputs']
+                poc_req_ids = mixed_batch_info.get('poc_req_ids', set())
+
+                for req_id in poc_req_ids:
+                    if req_id not in req_id_to_index_output_copy:
+                        idx = len(req_ids_output_copy)
+                        req_ids_output_copy.append(req_id)
+                        req_id_to_index_output_copy[req_id] = idx
+                        valid_sampled_token_ids.append([])
+            elif mixed_batch_info.get('is_mixed'):
+                poc_metadata = mixed_batch_info.get('poc_metadata')
+                poc_requests = mixed_batch_info.get('poc_requests', [])
+
+                if poc_metadata and hidden_states is not None:
+                    poc_outputs_dict = mixed_decode.process_poc_outputs_from_hidden(
+                        self, hidden_states, poc_metadata
+                    )
+
+                    for req in poc_requests:
+                        if req.req_id not in req_id_to_index_output_copy:
+                            idx = len(req_ids_output_copy)
+                            req_ids_output_copy.append(req.req_id)
+                            req_id_to_index_output_copy[req.req_id] = idx
+                            valid_sampled_token_ids.append([])
+
+            self._mixed_batch_info = None
+
         # self.kv_connector_output may be modified during drafting
         kv_connector_output = self.kv_connector_output
         self.kv_connector_output = None
@@ -4347,6 +4607,7 @@ class GPUModelRunner(
                 else None,
                 num_nans_in_logits=num_nans_in_logits,
                 cudagraph_stats=cudagraph_stats,
+                poc_outputs=poc_outputs_dict,
             )
 
         if not self.use_async_scheduling:
@@ -4797,6 +5058,16 @@ class GPUModelRunner(
                     self.model = self.load_lora_model(
                         self.model, self.vllm_config, self.device
                     )
+                # PoC: wrap decoder layers with the inline Householder transform
+                # BEFORE compilation/capture so it's baked into vLLM's native graph
+                # (identity on chat rows; driven by the shared mask buffer).
+                from vllm.poc.native import attach_native_poc
+                _inner = getattr(self.model, "model", self.model)
+                _layers = getattr(_inner, "layers", None)
+                if _layers is not None:
+                    self._poc_native = attach_native_poc(
+                        self.model, _layers, _inner, self.max_num_tokens,
+                        self.model_config.get_hidden_size(), self.device, self.dtype)
                 if hasattr(self, "drafter"):
                     logger.info_once("Loading drafter model...")
                     self.drafter.load_model(self.model)

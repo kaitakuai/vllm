@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any
 import torch
 
 from vllm.multimodal.inputs import MultiModalFeatureSpec
+from vllm.poc.poc_params import PoCParams
 from vllm.pooling_params import PoolingParams
 from vllm.sampling_params import SamplingParams
 from vllm.utils import length_from_prompt_token_ids_or_embeds
@@ -63,6 +64,7 @@ class Request:
         prompt_token_ids: list[int] | None,
         sampling_params: SamplingParams | None,
         pooling_params: PoolingParams | None,
+        poc_params: PoCParams | None = None,
         client_index: int = 0,
         arrival_time: float | None = None,
         prompt_embeds: torch.Tensor | None = None,
@@ -80,6 +82,7 @@ class Request:
         self.priority = priority
         self.sampling_params = sampling_params
         self.pooling_params = pooling_params
+        self.poc_params = poc_params
         self.lora_request = lora_request
         self.structured_output_request = StructuredOutputRequest.from_sampling_params(
             sampling_params
@@ -95,7 +98,11 @@ class Request:
         # P/D: Connector-specific KV transfer parameters.
         self.kv_transfer_params: dict[str, Any] | None = None
 
-        if pooling_params is not None:
+        if poc_params is not None:
+            assert sampling_params is None and pooling_params is None
+            # PoC is always single-step (prefill-only)
+            self.max_tokens = 1
+        elif pooling_params is not None:
             # Pooling models.
             self.max_tokens = 1
         elif sampling_params is not None:
@@ -187,6 +194,7 @@ class Request:
             mm_features=request.mm_features,
             sampling_params=request.sampling_params,
             pooling_params=request.pooling_params,
+            poc_params=request.poc_params,
             arrival_time=request.arrival_time,
             lora_request=request.lora_request,
             cache_salt=request.cache_salt,

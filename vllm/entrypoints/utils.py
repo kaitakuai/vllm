@@ -115,6 +115,11 @@ def load_aware_call(func):
         if not getattr(raw_request.app.state, "enable_server_load_tracking", False):
             return await func(*args, **kwargs)
 
+        # Reject if PoC is running in exclusive mode
+        if getattr(raw_request.app.state, "poc_exclusive_mode", False):
+            from fastapi import HTTPException
+            raise HTTPException(status_code=503, detail="PoC in progress")
+
         # ensure the counter exists
         if not hasattr(raw_request.app.state, "server_load_metrics"):
             raw_request.app.state.server_load_metrics = 0
