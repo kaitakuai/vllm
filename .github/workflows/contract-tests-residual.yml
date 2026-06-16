@@ -118,13 +118,19 @@ jobs:
           set -euo pipefail
           cd "$STAGE"
           python - <<'PY'
+          # Use __annotations__ — works for both dataclass and msgspec.Struct.
+          # In vllm 0.23 SamplingParams is `msgspec.Struct` (with
+          # PydanticMsgspecMixin), not a dataclass — so __dataclass_fields__
+          # is absent; __annotations__ is the right surface to inspect.
           from vllm.sampling_params import SamplingParams
-          assert hasattr(SamplingParams, '__dataclass_fields__'), \
-              "SamplingParams stopped being a dataclass — upstream refactor"
-          fields = set(SamplingParams.__dataclass_fields__.keys())
-          assert 'logprobs_mode' in fields, "overlay missed logprobs_mode"
-          assert 'enforced_token_ids' in fields, "overlay missed enforced_token_ids"
-          print("overlay-sanity OK")
+          annotations = set(getattr(SamplingParams, '__annotations__', {}) or {})
+          assert annotations, \
+              "SamplingParams has no __annotations__ — upstream refactor (class moved or fields stripped)"
+          assert 'logprobs_mode' in annotations, \
+              "overlay missed logprobs_mode (present annotations: " + ", ".join(sorted(annotations)) + ")"
+          assert 'enforced_token_ids' in annotations, \
+              "overlay missed enforced_token_ids (present annotations: " + ", ".join(sorted(annotations)) + ")"
+          print("overlay-sanity OK; SamplingParams carries logprobs_mode + enforced_token_ids.")
           PY
 
       - name: Run contract tests against overlaid vllm
