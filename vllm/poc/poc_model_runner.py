@@ -15,7 +15,8 @@ from typing import List, Optional, Dict, Any
 
 from vllm.distributed import get_pp_group, get_tp_group
 from vllm.distributed.communication_op import broadcast_tensor_dict
-from vllm.forward_context import set_forward_context
+from vllm.forward_context import set_forward_context, BatchDescriptor
+from vllm.config.compilation import CUDAGraphMode
 from vllm.sequence import IntermediateTensors
 from vllm.logger import init_logger
 
@@ -426,6 +427,82 @@ def _get_or_create_attn_metadata(batch_size, seq_len, block_size, device, worker
     return _create_v1_attn_metadata(batch_size, seq_len, block_size, device, worker)
 
 
+class _PocCaptureCtx:
+    """Persistent buffers + cached attn metadata for FULL CUDA-graph capture of the
+    isolated PoC prefill forward. Built once per (batch, seq_len, hidden, block) and
+    reused: the forward fills the buffers in place, so the captured graph replays
+    reading stable addresses. Our isolated forward never interleaves with engine
+    steps, so caching the attn metadata is safe (unlike the hook/eager path)."""
+
+    def __init__(self, batch, seq_len, hidden_size, block_size, device, dtype, worker):
+        n = batch * seq_len
+        self.num_tokens = n
+        self.inputs_embeds = torch.zeros(n, hidden_size, device=device, dtype=dtype)
+        self.positions = torch.arange(seq_len, device=device).repeat(batch)
+        self.input_ids = torch.zeros(n, dtype=torch.long, device=device)
+        self.attn_metadata, self.slot_mapping_dict = _create_v1_attn_metadata(
+            batch, seq_len, block_size, device, worker)
+        # num_tokens distinguishes our prefill key (batch*seq_len, large) from the
+        # dispatcher's decode keys (num_tokens=batch, small) -> no graph collision.
+        self.key = BatchDescriptor(num_tokens=n, num_reqs=batch, uniform=True)
+        self.graph_ready = False
+
+
+def _get_poc_capture_ctx(worker, batch, seq_len, hidden_size, block_size, device, dtype):
+    cache = getattr(worker, "_poc_capture_ctxs", None)
+    if cache is None:
+        cache = {}
+        worker._poc_capture_ctxs = cache
+    k = (batch, seq_len, hidden_size, block_size)
+    ctx = cache.get(k)
+    if ctx is None:
+        ctx = _PocCaptureCtx(batch, seq_len, hidden_size, block_size, device, dtype, worker)
+        cache[k] = ctx
+    return ctx
+
+
+def _capture_poc_prefill(worker, vllm_config, model, ctx, device):
+    """One-time warmup + FULL CUDA-graph capture of the isolated PoC prefill.
+
+    vLLM only allows cudagraph capture during a guarded window; our PoC forward
+    runs at request time, so we re-open the window explicitly (mirrors
+    GPUModelRunner._capture_cudagraphs: set_cudagraph_capturing_enabled(True) +
+    graph_capture(device)). ctx buffers must already be filled. The warmup pass
+    (NONE mode) triggers compile + sizes workspaces outside the captured region;
+    the FULL pass makes the server's CUDAGraphWrapper record the graph for ctx.key.
+    """
+    from vllm.compilation.monitor import set_cudagraph_capturing_enabled
+    from vllm.distributed.parallel_state import graph_capture as _graph_capture
+
+    # warmup: compiled, not captured (sizes workspaces, runs lazy init)
+    with set_forward_context(
+        ctx.attn_metadata, vllm_config, num_tokens=ctx.num_tokens,
+        slot_mapping=ctx.slot_mapping_dict,
+        cudagraph_runtime_mode=CUDAGraphMode.NONE, skip_compiled=False,
+    ):
+        with _poc_reflection(worker):
+            model(input_ids=ctx.input_ids, positions=ctx.positions,
+                  intermediate_tensors=None, inputs_embeds=ctx.inputs_embeds)
+    torch.cuda.synchronize()
+
+    set_cudagraph_capturing_enabled(True)
+    try:
+        with _graph_capture(device=device):
+            with set_forward_context(
+                ctx.attn_metadata, vllm_config, num_tokens=ctx.num_tokens,
+                slot_mapping=ctx.slot_mapping_dict,
+                cudagraph_runtime_mode=CUDAGraphMode.FULL,
+                batch_descriptor=ctx.key, skip_compiled=False,
+            ):
+                with _poc_reflection(worker):
+                    model(input_ids=ctx.input_ids, positions=ctx.positions,
+                          intermediate_tensors=None, inputs_embeds=ctx.inputs_embeds)
+    finally:
+        set_cudagraph_capturing_enabled(False)
+    torch.cuda.synchronize()
+    ctx.graph_ready = True
+
+
 # TODO: Should we get rid of this apprach?
 def _select_poc_kv_scratch(
     kv_caches: list,
@@ -579,22 +656,58 @@ def execute_poc_forward(
             pp_group.recv_tensor_dict(all_gather_group=get_tp_group())
         )
 
-    with set_forward_context(
-        attn_metadata, vllm_config,
-        num_tokens=batch_size * seq_len,
-        slot_mapping=slot_mapping_dict,
-        # Follow the server's compilation setting: compiled when not --enforce-eager,
-        # eager otherwise. Removes the PoC eager-jail (decode-PoC compiled mode).
-        skip_compiled=(vllm_config.model_config.enforce_eager or os.environ.get("GONKA_POC_PREFILL_EAGER") == "1"),
-    ):
-        with _poc_reflection(worker):
-            hidden_states = model(
-                input_ids=(None if (vllm_config.model_config.enforce_eager or os.environ.get("GONKA_POC_PREFILL_EAGER") == "1")
-                           else torch.zeros(batch_size * seq_len, dtype=torch.long, device=device)),
-                positions=positions,
-                intermediate_tensors=intermediate_tensors,
-                inputs_embeds=inputs_embeds.view(-1, hidden_size) if inputs_embeds is not None else None,
-            )
+    prefill_eager = (vllm_config.model_config.enforce_eager
+                     or os.environ.get("GONKA_POC_PREFILL_EAGER") == "1")
+    # FULL CUDA-graph capture of the compiled prefill (Step 2). Requires the server
+    # to run with a full-graph cudagraph_mode (model wrapped in CUDAGraphWrapper) and
+    # the native wrapper (graphable reflection). First call captures the graph for our
+    # BatchDescriptor; subsequent calls replay it. Only on the first PP rank (where
+    # inputs_embeds exist) and not in eager mode.
+    capture_on = (os.environ.get("GONKA_POC_CAPTURE") == "1"
+                  and not prefill_eager
+                  and pp_group.is_first_rank
+                  and inputs_embeds is not None)
+
+    if capture_on:
+        ctx = _get_poc_capture_ctx(
+            worker, batch_size, seq_len, hidden_size, block_size, device, dtype)
+        ctx.inputs_embeds.copy_(inputs_embeds.reshape(-1, hidden_size))
+        if not ctx.graph_ready:
+            _capture_poc_prefill(worker, vllm_config, model, ctx, device)
+        # replay: the CUDAGraphWrapper finds the captured graph for ctx.key and
+        # replays it reading the (in-place filled) persistent buffers.
+        with set_forward_context(
+            ctx.attn_metadata, vllm_config,
+            num_tokens=ctx.num_tokens,
+            slot_mapping=ctx.slot_mapping_dict,
+            cudagraph_runtime_mode=CUDAGraphMode.FULL,
+            batch_descriptor=ctx.key,
+            skip_compiled=False,
+        ):
+            with _poc_reflection(worker):
+                hidden_states = model(
+                    input_ids=ctx.input_ids,
+                    positions=ctx.positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=ctx.inputs_embeds,
+                )
+    else:
+        with set_forward_context(
+            attn_metadata, vllm_config,
+            num_tokens=batch_size * seq_len,
+            slot_mapping=slot_mapping_dict,
+            # Follow the server's compilation setting: compiled when not --enforce-eager,
+            # eager otherwise. Removes the PoC eager-jail (decode-PoC compiled mode).
+            skip_compiled=prefill_eager,
+        ):
+            with _poc_reflection(worker):
+                hidden_states = model(
+                    input_ids=(None if prefill_eager
+                               else torch.zeros(batch_size * seq_len, dtype=torch.long, device=device)),
+                    positions=positions,
+                    intermediate_tensors=intermediate_tensors,
+                    inputs_embeds=inputs_embeds.view(-1, hidden_size) if inputs_embeds is not None else None,
+                )
 
     # PP: send to next rank if not last
     if not pp_group.is_last_rank:
