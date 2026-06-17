@@ -136,6 +136,7 @@ async def poc_request(self, action: str, payload: dict, timeout_ms: int = 60000)
         # decode-PoC outputs (present only when max_tokens>0)
         k_points_steps = result.get("k_points_steps")
         n_sphere_mismatches = result.get("n_sphere_mismatches")
+        vectors_steps = result.get("vectors_steps")  # per-step L2 vectors (decode-PoC)
 
         artifacts = []
         for i, nonce in enumerate(result_nonces):
@@ -144,6 +145,10 @@ async def poc_request(self, action: str, payload: dict, timeout_ms: int = 60000)
                 artifact["k_points_steps"] = k_points_steps[i]
             if n_sphere_mismatches is not None:
                 artifact["n_sphere_mismatches"] = n_sphere_mismatches[i]
+            if vectors_steps is not None:
+                artifact["vectors_steps_b64"] = [
+                    encode_vector(v) for v in vectors_steps[i]
+                ]
             artifacts.append(artifact)
 
         return {"artifacts": artifacts}

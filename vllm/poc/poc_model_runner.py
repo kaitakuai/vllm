@@ -812,6 +812,21 @@ def execute_poc_forward(
         ]
         k_points_steps_per_nonce: List[List[int]] = [[k] for k in k0_list]
 
+        # decode-PoC L2 metric: per-step continuous vector via the PREFILL chain
+        # (pick k_dim -> Haar -> normalize), salted per step (+prev_k). Step 0 uses
+        # the prefill hidden. Enables robust L2-distance fraud detection per decode
+        # step (vs the discrete sphere k-id, which collapses cross-hw under reflection).
+        def _poc_step_vec(hidden_norm, step_idx, prev_ids):
+            idxv = random_pick_indices(
+                block_hash, public_key, nonces, hidden_size, k_dim, device,
+                prev_point_ids=prev_ids, step=step_idx)
+            xkv = torch.gather(hidden_norm, 1, idxv)
+            ykv = apply_haar_rotation(block_hash, public_key, nonces, xkv, device)
+            ykv = ykv / (ykv.norm(dim=-1, keepdim=True) + 1e-8)
+            return ykv.half().cpu().numpy()  # [batch, k_dim]
+        v0 = _poc_step_vec(last_hidden, 0, None)
+        vectors_steps_per_nonce: List[List] = [[v0[i]] for i in range(batch_size)]
+
         # Compare prefill k against the reference (step 0).
         for i, inf in enumerate(inf_steps_per_nonce):
             if inf is not None and len(inf) > 0 and k0_list[i] != inf[0]:
@@ -922,6 +937,11 @@ def execute_poc_forward(
             for i, computed_k in enumerate(step_k_list):
                 k_points_steps_per_nonce[i].append(computed_k)
 
+            # per-step L2 vector (same prefill chain, seeded by this step's prev_k)
+            vstep = _poc_step_vec(last_hidden_dec, step, prev_k)
+            for i in range(batch_size):
+                vectors_steps_per_nonce[i].append(vstep[i])
+
             # Teacher forcing: validation nonces advance on the reference k and
             # count divergences; generation nonces advance on their own k.
             new_prev_k: List[int] = []
@@ -937,5 +957,6 @@ def execute_poc_forward(
 
         result["k_points_steps"] = k_points_steps_per_nonce
         result["n_sphere_mismatches"] = mismatch_count
+        result["vectors_steps"] = vectors_steps_per_nonce
 
     return result
