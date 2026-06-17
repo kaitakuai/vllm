@@ -2,14 +2,14 @@
 runs step-driven mixed (the default).
 
 Bug (root-causes/mixed-decode-skips-validation): a *validation* request — one
-carrying ``inference_k_points_steps`` (``PoCParams.is_validation``) — did not
-consume ``inference_k_points_steps`` on the mixed-decode path. The server returned
+carrying ``enforced_k_steps`` (``PoCParams.is_validation``) — did not
+consume ``enforced_k_steps`` on the mixed-decode path. The server returned
 the ``-1`` sentinel for ``n_sphere_mismatches`` instead of the real aligned count,
 so an honest validator could not separate honest from fraud once mixed decode
 became the default.
 
 Fix: validation recompute runs through the shared ``aligned_step`` — each step
-seeds from the reference ``inference_k_points_steps`` (no cascade) and counts the
+seeds from the reference ``enforced_k_steps`` (no cascade) and counts the
 real ``n_sphere_mismatches`` — regardless of mixing, while ordinary decode-PoC
 *generation* still mixes with chat.
 
@@ -65,7 +65,7 @@ def _validate_roundtrip(url: str) -> dict[int, dict]:
     assert all(inf_k[n] for n in NONCES), f"empty reference trajectory: {inf_k}"
     # 2. validation -> same request + the reference trajectory (is_validation)
     val_body = poc_request_body(BLOCK_HASH, NONCES, MODEL, wait=True, max_tokens=MAX_TOKENS)
-    val_body["inference_k_points_steps"] = inf_k
+    val_body["enforced_k_steps"] = inf_k
     return _post(url, val_body)
 
 
@@ -74,7 +74,7 @@ def test_validation_computes_real_mismatches():
     """A validation request returns a REAL n_sphere_mismatches (never -1) and ~0
     for an honest self-recompute, for >=2 nonces. Generation runs mixed (default);
     validation stays aligned to the reference (the regression: mixed must not
-    swallow inference_k_points_steps)."""
+    swallow enforced_k_steps)."""
     with PoCTestServer(MODEL, BASE_ARGS) as srv:
         val = _validate_roundtrip(srv.url_root)
 
@@ -83,7 +83,7 @@ def test_validation_computes_real_mismatches():
         # (1) computed at all — the regression: mixed path left it at the -1 sentinel
         assert nsm is not None and nsm != -1, (
             f"nonce {n}: n_sphere_mismatches={nsm} — validation NOT computed "
-            f"(mixed path swallowed inference_k_points_steps)")
+            f"(mixed path swallowed enforced_k_steps)")
         # (2) honest self-recompute is ~0
         assert 0 <= nsm <= HONEST_TOL, (
             f"nonce {n}: honest self-recompute expected ~0 "

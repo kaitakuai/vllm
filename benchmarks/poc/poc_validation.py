@@ -90,7 +90,7 @@ def send_validation_request(
             "max_tokens": max_tokens,
         },
         "wait": True,
-        "inference_k_points_steps": inference_sphere_k_steps,
+        "enforced_k_steps": inference_sphere_k_steps,
     }
     resp = requests.post(url, json=payload, timeout=timeout)
     resp.raise_for_status()

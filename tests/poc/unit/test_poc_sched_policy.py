@@ -18,7 +18,7 @@ def _params(*, max_tokens, validation, seq_len=256):
     return PoCParams(
         block_hash="0xabc", public_key="0xpub", block_height=1, nonce=0,
         seq_len=seq_len, max_tokens=max_tokens,
-        inference_k_points_steps=[1, 2, 3] if validation else None,
+        enforced_k_steps=[1, 2, 3] if validation else None,
     )
 
 

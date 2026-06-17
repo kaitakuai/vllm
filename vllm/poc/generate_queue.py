@@ -25,7 +25,7 @@ async def compute_nonce_artifacts(
     k_dim: int,
     poc_decode: bool = False,
     max_tokens: int = 0,
-    inference_k_points_steps: Optional[Dict[int, List[int]]] = None,
+    enforced_k_steps: Optional[Dict[int, List[int]]] = None,
     debug: bool = False,
 ) -> List[dict]:
     """Compute PoC artifacts for a set of nonces via the scheduler.
@@ -40,8 +40,8 @@ async def compute_nonce_artifacts(
     /generate endpoint and the queue worker call it.
     """
     async def compute_one(nonce: int) -> Optional[dict]:
-        inf_steps = (inference_k_points_steps.get(nonce)
-                     if inference_k_points_steps else None)
+        inf_steps = (enforced_k_steps.get(nonce)
+                     if enforced_k_steps else None)
         poc_params = PoCParams(
             block_hash=block_hash,
             public_key=public_key,
@@ -51,7 +51,7 @@ async def compute_nonce_artifacts(
             k_dim=k_dim,
             poc_decode=poc_decode,
             max_tokens=max_tokens,
-            inference_k_points_steps=inf_steps,
+            enforced_k_steps=inf_steps,
             debug=debug,
         )
         request_id = f"poc-{uuid.uuid4()}"
@@ -110,7 +110,7 @@ class GenerateJob:
     poc_stronger_rng: bool = False
     poc_decode: bool = False
     max_tokens: int = 0
-    inference_k_points_steps: Optional[Dict[int, List[int]]] = None
+    enforced_k_steps: Optional[Dict[int, List[int]]] = None
     debug: bool = False
     validation_artifacts: Optional[Dict[int, str]] = None
     stat_test_dist_threshold: float = DEFAULT_DIST_THRESHOLD
@@ -301,10 +301,10 @@ class GenerateQueue:
                 raise RuntimeError("Job cancelled")
 
             chunk_inference_steps = None
-            if job.inference_k_points_steps:
+            if job.enforced_k_steps:
                 chunk_inference_steps = {
-                    n: job.inference_k_points_steps[n]
-                    for n in chunk if n in job.inference_k_points_steps
+                    n: job.enforced_k_steps[n]
+                    for n in chunk if n in job.enforced_k_steps
                 }
 
             try:
@@ -314,7 +314,7 @@ class GenerateQueue:
                     job.seq_len, job.k_dim,
                     poc_decode=job.poc_decode,
                     max_tokens=job.max_tokens,
-                    inference_k_points_steps=chunk_inference_steps,
+                    enforced_k_steps=chunk_inference_steps,
                     debug=job.debug,
                 )
             except asyncio.CancelledError:
@@ -344,6 +344,7 @@ class GenerateQueue:
             p_mismatch=job.stat_test_p_mismatch,
             fraud_threshold=job.stat_test_fraud_threshold,
             k_dim=job.k_dim,
+            use_trajectory=job.max_tokens > 0,
         )
         
         return {

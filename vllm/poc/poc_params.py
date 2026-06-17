@@ -23,13 +23,13 @@ class PoCParams:
     # server computes its own k-id, compares against the reference, and uses
     # the reference k-id to seed the *next* decode embedding so that both
     # servers always run the same forward pass regardless of local deviations.
-    inference_k_points_steps: Optional[List[int]] = field(default=None, repr=False)
+    enforced_k_steps: Optional[List[int]] = field(default=None, repr=False)
     # Debug mode: collect per-step sphere indices and values for mismatch analysis.
     debug: bool = False
 
     @property
     def is_validation(self) -> bool:
-        return self.inference_k_points_steps is not None
+        return self.enforced_k_steps is not None
 
     def clone(self) -> "PoCParams":
         return PoCParams(
@@ -41,9 +41,9 @@ class PoCParams:
             k_dim=self.k_dim,
             poc_decode=self.poc_decode,
             max_tokens=self.max_tokens,
-            inference_k_points_steps=(
-                list(self.inference_k_points_steps)
-                if self.inference_k_points_steps is not None else None
+            enforced_k_steps=(
+                list(self.enforced_k_steps)
+                if self.enforced_k_steps is not None else None
             ),
             debug=self.debug,
         )

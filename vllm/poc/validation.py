@@ -62,17 +62,41 @@ def run_validation(
     p_mismatch: float = DEFAULT_P_MISMATCH,
     fraud_threshold: float = DEFAULT_FRAUD_THRESHOLD,
     k_dim: int = 12,
+    use_trajectory: bool = False,
 ) -> Dict:
-    """Run full validation with fraud test.
-    
-    Returns:
-        Dict with n_total, n_mismatch, mismatch_nonces, p_value, fraud_detected
+    """Run full validation with fraud test. Same response shape for both flows.
+
+    - prefill (use_trajectory=False): vector-L2 per nonce + binomial fraud_test
+      (uses p_mismatch + fraud_threshold). Unchanged.
+    - decode (use_trajectory=True, max_tokens>0): count sphere_k mismatches over
+      all steps; fraud when the mismatch rate exceeds p_mismatch (reused as the max
+      allowed fraction). No binomial; p_value carries the rate but the decision
+      ignores it.
     """
-    n_mismatch, mismatch_nonces = validate_artifacts(
-        computed_artifacts, validation_map, dist_threshold, k_dim
-    )
-    p_value, fraud_detected = fraud_test(n_mismatch, n_total, p_mismatch, fraud_threshold)
-    
+    if use_trajectory:
+        n_mismatch = 0
+        n_steps = 0
+        mismatch_nonces = []
+        for a in computed_artifacts:
+            traj = a.get("k_points_steps") or []
+            if not traj:
+                continue
+            m = a.get("n_sphere_mismatches", 0) or 0
+            if m < 0:  # -1 == generation (no reference); treat as no mismatch
+                m = 0
+            n_mismatch += m
+            n_steps += len(traj)
+            if m > 0:
+                mismatch_nonces.append(a["nonce"])
+        rate = (n_mismatch / n_steps) if n_steps else 0.0
+        fraud_detected = rate > p_mismatch   # decision; p_value not used
+        p_value = rate                       # kept for shape; ignored by the decision
+    else:
+        n_mismatch, mismatch_nonces = validate_artifacts(
+            computed_artifacts, validation_map, dist_threshold, k_dim
+        )
+        p_value, fraud_detected = fraud_test(n_mismatch, n_total, p_mismatch, fraud_threshold)
+
     return {
         "n_total": n_total,
         "n_mismatch": n_mismatch,

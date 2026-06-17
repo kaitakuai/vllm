@@ -1,4 +1,4 @@
-"""A validation PoC (carrying inference_k_points_steps) must compute the real
+"""A validation PoC (carrying enforced_k_steps) must compute the real
 aligned n_sphere_mismatches even when a generation PoC runs concurrently. Only the
 pure path computes the aligned count; a validation request must therefore get an
 exclusive pure batch. Without isolation the generation PoC forces the whole batch
@@ -37,7 +37,7 @@ def _body(nonces, block_hash, infk=None):
         "wait": True,
     }
     if infk is not None:
-        body["inference_k_points_steps"] = infk
+        body["enforced_k_steps"] = infk
     return body
 
 

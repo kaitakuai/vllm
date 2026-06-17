@@ -11,7 +11,7 @@ called "validated":
   forward never returns (HANG). Fix: graphable uniform-decode mixed batches drop
   force_eager so vLLM builds + re-plans the STABLE cudagraph decode buffers per step.
 
-Correctness is measured the RIGHT way — ALIGNED validation (inference_k_points_steps),
+Correctness is measured the RIGHT way — ALIGNED validation (enforced_k_steps),
 which compares each step independently (no cascade) and is robust to benign batch-shape
 sphere_k boundary flips. A byte-identity "alone vs concurrent" check is NOT valid here:
 "alone" runs the pure-PoC path, "concurrent" the mixed path, and a non-aligned compare
@@ -57,15 +57,15 @@ def graph_server():
         yield srv
 
 
-def _poc_body(inference_k_points_steps=None):
+def _poc_body(enforced_k_steps=None):
     body = {
         "block_hash": "deadbeef" * 8, "block_height": 100, "public_key": "cafebabe" * 8,
         "node_id": 0, "node_count": 1, "nonces": NONCES,
         "params": {"model": MODEL, "seq_len": 256, "k_dim": 12, "max_tokens": POC_MAX_TOKENS},
         "wait": True,
     }
-    if inference_k_points_steps is not None:
-        body["inference_k_points_steps"] = inference_k_points_steps
+    if enforced_k_steps is not None:
+        body["enforced_k_steps"] = enforced_k_steps
     return body
 
 

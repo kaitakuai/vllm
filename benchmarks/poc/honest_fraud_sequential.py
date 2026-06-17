@@ -12,7 +12,7 @@ validation across time:
                               --mode validate --url <honest> --traj fraud_traj.json  --label FRAUD
 
 Validation seeds the server with the saved inference sphere_k trajectory
-(``inference_k_points_steps``) so steps are ALIGNED (a disagreement does not
+(``enforced_k_steps``) so steps are ALIGNED (a disagreement does not
 cascade); the server returns ``n_sphere_mismatches`` = #steps where this server's
 sphere_k differs from the seeded one. Honest (same model) ~ 0; fraud (different
 model) is high. See wiki: testing/honest-fraud-separation.

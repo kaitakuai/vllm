@@ -121,7 +121,7 @@ class PoCGenerateRequest(BaseModel):
     validation: Optional[ValidationModel] = None
     stat_test: Optional[StatTestModel] = None
     poc_stronger_rng: bool = False
-    inference_k_points_steps: Optional[Dict[int, List[int]]] = None
+    enforced_k_steps: Optional[Dict[int, List[int]]] = None
     debug: bool = False
 
 
@@ -250,7 +250,7 @@ async def _compute_artifacts_chunk(
     poc_stronger_rng: bool = False,
     poc_decode: bool = False,
     max_tokens: int = 0,
-    inference_k_points_steps: Optional[Dict[int, List[int]]] = None,
+    enforced_k_steps: Optional[Dict[int, List[int]]] = None,
     debug: bool = False,
     timeout_sec: float = POC_GENERATE_CHUNK_TIMEOUT_SEC,
     check_cancelled: Optional[callable] = None,
@@ -270,7 +270,7 @@ async def _compute_artifacts_chunk(
         seq_len, k_dim,
         poc_decode=poc_decode,
         max_tokens=max_tokens,
-        inference_k_points_steps=inference_k_points_steps,
+        enforced_k_steps=enforced_k_steps,
         debug=debug,
     )
 
@@ -470,7 +470,7 @@ async def generate(request: Request, body: PoCGenerateRequest) -> dict:
             poc_stronger_rng=body.poc_stronger_rng,
             poc_decode=getattr(request.app.state, "poc_decode", False),
             max_tokens=body.params.max_tokens,
-            inference_k_points_steps=body.inference_k_points_steps,
+            enforced_k_steps=body.enforced_k_steps,
             debug=body.debug,
             validation_artifacts=validation_map,
             stat_test_dist_threshold=stat_test.dist_threshold,
@@ -512,9 +512,9 @@ async def generate(request: Request, body: PoCGenerateRequest) -> dict:
             await asyncio.sleep(0.1)
 
         chunk_inference_steps = None
-        if body.inference_k_points_steps:
-            chunk_inference_steps = {n: body.inference_k_points_steps[n]
-                                     for n in chunk if n in body.inference_k_points_steps}
+        if body.enforced_k_steps:
+            chunk_inference_steps = {n: body.enforced_k_steps[n]
+                                     for n in chunk if n in body.enforced_k_steps}
 
         try:
             artifacts = await _compute_artifacts_chunk(
@@ -522,7 +522,7 @@ async def generate(request: Request, body: PoCGenerateRequest) -> dict:
                 body.params.seq_len, body.params.k_dim, body.poc_stronger_rng,
                 poc_decode=poc_decode,
                 max_tokens=body.params.max_tokens,
-                inference_k_points_steps=chunk_inference_steps,
+                enforced_k_steps=chunk_inference_steps,
                 debug=body.debug,
                 timeout_sec=POC_GENERATE_CHUNK_TIMEOUT_SEC,
                 check_cancelled=check_cancelled,
@@ -553,8 +553,11 @@ async def generate(request: Request, body: PoCGenerateRequest) -> dict:
         p_mismatch=stat_test.p_mismatch,
         fraud_threshold=stat_test.fraud_threshold,
         k_dim=body.params.k_dim,
+        # decode flow (max_tokens>0) → count sphere_k mismatches vs p_mismatch;
+        # prefill flow → vector-L2 + binomial (unchanged). Same response shape.
+        use_trajectory=body.params.max_tokens > 0,
     )
-    
+
     return {
         "status": "completed",
         "request_id": str(uuid.uuid4()),

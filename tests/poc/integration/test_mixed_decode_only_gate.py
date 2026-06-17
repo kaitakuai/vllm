@@ -39,7 +39,7 @@ def _poc_body(bh, infk=None):
             "params": {"model": MODEL, "seq_len": 256, "k_dim": 12, "max_tokens": POC_MAX_TOKENS},
             "wait": True}
     if infk is not None:
-        body["inference_k_points_steps"] = infk
+        body["enforced_k_steps"] = infk
     return body
 
 

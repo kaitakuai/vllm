@@ -50,7 +50,7 @@ def test_native_transform_honest_separation_in_eager():
         # validation -> honest self-recompute aligned to that trajectory
         val_body = poc_request_body(BLOCK_HASH, NONCES, MODEL, wait=True,
                                     max_tokens=MAX_TOKENS)
-        val_body["inference_k_points_steps"] = inf_k
+        val_body["enforced_k_steps"] = inf_k
         val = _post(url, val_body)
 
     for n in NONCES:

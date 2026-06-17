@@ -69,7 +69,7 @@ def _settle_idle(url: str, baseline: float, tol: float, tries: int = 15) -> floa
 async def _poc(client, url, infk=None):
     body = poc_request_body("0xkvleak", NONCES, MODEL, wait=True, max_tokens=POC_MAX_TOKENS)
     if infk is not None:
-        body["inference_k_points_steps"] = infk
+        body["enforced_k_steps"] = infk
     r = await client.post(f"{url}{POC_URL}", json=body)
     r.raise_for_status()
     d = r.json()

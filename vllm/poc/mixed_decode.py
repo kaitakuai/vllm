@@ -112,7 +112,7 @@ class PoCDecodeState:
     # the prefill artifact vector (base64), set at the prefill step.
     vector_b64: str = ""
     n_sphere_mismatches: int = 0
-    # validation reference trajectory (inference_k_points_steps), or None for
+    # validation reference trajectory (enforced_k_steps), or None for
     # generation. index 0 = prefill k, 1..N = decode-step k. Drives aligned_step.
     reference: list | None = None
 
@@ -192,7 +192,7 @@ def setup_decode_poc(runner, poc_requests) -> bool:
             continue
         # decode step = tokens computed beyond prefill (0 during the prefill step)
         st.step = max(0, r.num_computed_tokens - pp.seq_len)
-        st.reference = pp.inference_k_points_steps  # None for generation
+        st.reference = pp.enforced_k_steps  # None for generation
     return True
 
 
