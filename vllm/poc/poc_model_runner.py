@@ -210,7 +210,10 @@ def _poc_reflection(worker):
     """
     state = getattr(worker, "_poc_native_state", None)
     if state is not None:
-        state.set_active(True)
+        # GONKA_POC_FORCE_INACTIVE: debug toggle to keep the wrapper inactive
+        # (no reflection) under compile, to isolate whether reflection is applied.
+        active = os.environ.get("GONKA_POC_FORCE_INACTIVE") != "1"
+        state.set_active(active)
         try:
             yield
         finally:

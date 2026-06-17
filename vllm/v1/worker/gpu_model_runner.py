@@ -4898,6 +4898,25 @@ class GPUModelRunner(
             self.get_model(), "requires_sequential_video_encoding"
         )  # Temporary hack for dynamic res video w/o support for bs>1 yet
 
+        # decode-PoC (#1135): attach graphable native Householder wrappers to the
+        # decoder layers BEFORE any torch.compile / cudagraph capture, so the
+        # reflection is recorded inside the compiled+captured graph. The legacy
+        # register_forward_hook path is dropped by dynamo and cannot be captured;
+        # attaching it lazily after compile breaks the aot fn (param lookup moves
+        # under the wrapper). Wrappers default to active=False (identity), so normal
+        # serving is unaffected until a PoC forward flips the flag. Opt-in only.
+        import os as _os
+        if _os.environ.get("GONKA_POC_NATIVE_HOUSEHOLDER") == "1" and not load_dummy_weights:
+            try:
+                from vllm.poc.native_householder import attach_native_poc
+                _hs = self.model_config.get_hidden_size()
+                attach_native_poc(self.model, _hs, self.device)
+                logger.info(
+                    "decode-PoC: native Householder wrappers attached pre-compile"
+                )
+            except Exception as _e:
+                logger.warning("decode-PoC native attach failed: %s", _e)
+
         if (
             is_mixture_of_experts(self.model)
             and self.parallel_config.enable_eplb
