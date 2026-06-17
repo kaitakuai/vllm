@@ -10,8 +10,10 @@ FROM ${BASE_IMAGE}
 # by mb/feat/port-pocv2-vllm-0.23.0 (Dockerfile.quick) — see that branch
 # for the original rationale.
 #
-# Files touched by the residual stack:
+# Files touched by the residual stack (8 total; reproduce with
+#   `git diff --name-only <upstream-base>..HEAD -- 'vllm/*.py'`):
 #   vllm/sampling_params.py
+#   vllm/v1/sample/metadata.py
 #   vllm/v1/sample/sampler.py
 #   vllm/v1/sample/ops/topk_topp_sampler.py
 #   vllm/v1/structured_output/__init__.py
@@ -38,7 +40,7 @@ COPY ./vllm /tmp/vllm-src
 # Derive VLLM_DIR at build time so this works regardless of the base image's
 # Python version (3.12, 3.13, ...) or install layout (dist-packages vs
 # site-packages, virtualenv, etc.).
-RUN VLLM_DIR=$(python -c "import vllm, os; print(os.path.dirname(vllm.__file__))") \
+RUN VLLM_DIR=$(python3 -c "import vllm, os; print(os.path.dirname(vllm.__file__))") \
     && [ -d "$VLLM_DIR" ] || (echo "ERROR: vllm not importable"; exit 1) \
     && cd /tmp/vllm-src \
     && find . -name "*.py" | tar -cf - -T - | tar -xf - -C "$VLLM_DIR/" \
