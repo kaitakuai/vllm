@@ -302,6 +302,7 @@ class AsyncLLM(EngineClient):
             raise EngineDeadError()
 
         if poc_params is not None:
+            # PoC emits its artifact ONCE (emit-once): a single finished output.
             queue = RequestOutputCollector(
                 output_kind=RequestOutputKind.FINAL_ONLY,
                 request_id=request_id,

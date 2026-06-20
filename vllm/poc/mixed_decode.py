@@ -115,6 +115,15 @@ class PoCDecodeState:
     # validation reference trajectory (enforced_k_steps), or None for
     # generation. index 0 = prefill k, 1..N = decode-step k. Drives aligned_step.
     reference: list | None = None
+    # --- GPU-native chaining: prev_k stays on device so the per-step host sync
+    # disappears (-> async scheduling works). The trajectory accumulates on device
+    # and is copied to host ONCE at end-of-sequence (emit-once), so no per-step
+    # delta crosses the IPC boundary. ---
+    base_seeds: "torch.Tensor | None" = None     # [1] int64 per-nonce base (set once)
+    prev_k_t: "torch.Tensor | None" = None        # [1] int64, chained on device
+    reference_t: "torch.Tensor | None" = None     # [R] int64 uploaded reference
+    mismatch_t: "torch.Tensor | None" = None      # [1] int64 on-device accumulator
+    k_steps_t: list = field(default_factory=list)  # list of [1] int64; cat+tolist at end
 
 
 class PoCMixedDecodeManager:
@@ -257,6 +266,9 @@ def build_unified_mixed_batch_inputs(
     poc_metadata = []
 
     offset = 0
+    # Decode-step embeddings are generated in ONE batched call after this loop
+    # (was per-nonce). Each entry: (decode_state, decode_step, offset).
+    decode_embed_jobs = []
 
     for req_idx in range(num_reqs):
         req_id = req_ids[req_idx]
@@ -274,14 +286,16 @@ def build_unified_mixed_batch_inputs(
 
             if st is not None and req_state.num_computed_tokens >= seq_len:
                 # Phase 2 decode step: one token, embed chained from prev sphere_k.
-                from vllm.poc.gpu_random import generate_decode_inputs
+                # GPU-native: prev_k is a device tensor (set by the previous step's
+                # output processing) -> no host sync -> async-scheduling safe. The
+                # embedding itself is generated in ONE batched call after the loop.
+                from vllm.poc.gpu_random import decode_base_seeds
                 decode_step = req_state.num_computed_tokens - seq_len + 1
-                poc_embeds = generate_decode_inputs(
-                    poc_params.block_hash, poc_params.public_key,
-                    [poc_params.nonce], [st.prev_k], step=decode_step,
-                    dim=hidden_size, device=runner.device, dtype=runner.dtype,
-                ).view(1, hidden_size)
-                unified_embeds[offset:offset + 1] = poc_embeds
+                if st.base_seeds is None:
+                    st.base_seeds = decode_base_seeds(
+                        poc_params.block_hash, poc_params.public_key,
+                        [poc_params.nonce], runner.device)
+                decode_embed_jobs.append((st, decode_step, offset))
                 unified_positions[offset] = req_state.num_computed_tokens
                 poc_position_mask[offset] = True
                 poc_metadata.append({
@@ -331,6 +345,21 @@ def build_unified_mixed_batch_inputs(
             )
             offset += num_tokens
 
+    # Batched decode-step embeddings: one generate_decode_inputs_gpu call for the
+    # whole nonce-batch (per-row identical to the old per-nonce calls).
+    if decode_embed_jobs:
+        from vllm.poc.gpu_random import generate_decode_inputs_gpu
+        base_seeds = torch.cat([j[0].base_seeds for j in decode_embed_jobs])  # [B]
+        prev_k = torch.cat([j[0].prev_k_t for j in decode_embed_jobs])        # [B]
+        steps = torch.tensor([j[1] for j in decode_embed_jobs],
+                             dtype=torch.int64, device=runner.device)
+        embeds = generate_decode_inputs_gpu(
+            base_seeds, prev_k, steps,
+            dim=hidden_size, device=runner.device, dtype=runner.dtype)  # [B, 1, H]
+        offs = torch.tensor([j[2] for j in decode_embed_jobs],
+                            dtype=torch.long, device=runner.device)
+        unified_embeds.index_copy_(0, offs, embeds[:, 0])   # [B, H] -> rows offs
+
     return unified_embeds, unified_positions, poc_position_mask, poc_metadata
 
 
@@ -340,19 +369,38 @@ def process_poc_outputs_from_hidden(
     poc_metadata: list[dict],
 ) -> dict[str, "PoCOutput"]:
     from vllm.v1.outputs import PoCOutput
-    from vllm.poc.gpu_random import random_pick_indices, apply_haar_rotation
+    from vllm.poc.gpu_random import (
+        random_pick_indices, apply_haar_rotation,
+        decode_base_seeds, random_pick_indices_gpu,
+    )
     from vllm.poc.data import encode_vector
     from vllm.poc.sphere import (
         SPHERE_DIM, _SPHERE_CODEBOOK, project_to_sphere, nearest_sphere_index,
     )
 
     poc_outputs = {}
+    # Codebook is constant (device-only); cache on the runner instead of re-copying
+    # it every step. nearest_sphere_index casts to float, so dtype here is moot.
+    codebook = getattr(runner, "_poc_codebook", None)
+    if codebook is None:
+        codebook = _SPHERE_CODEBOOK.to(device=runner.device)
+        runner._poc_codebook = codebook
+
+    # Decode steps are the hot path; collect them and run ONE batched set of GPU
+    # ops for the whole nonce-batch below (was a per-nonce Python loop = B× the
+    # kernel launches). Prefill-only / prefill-step PoCs (rare, once per request)
+    # stay inline.
+    decode_metas = []
 
     for meta in poc_metadata:
+        st = meta.get('decode_state')
+        if st is not None and 'decode_step' in meta:
+            decode_metas.append(meta)
+            continue
+
         end = meta['start_idx'] + meta['length']
         poc_params = meta['poc_params']
         nonce = poc_params.nonce
-        st = meta.get('decode_state')
 
         last_hidden = hidden_states[end - 1].float()
         last_hidden = last_hidden / (last_hidden.norm() + 1e-8)
@@ -369,16 +417,11 @@ def process_poc_outputs_from_hidden(
             yk = yk / (yk.norm() + 1e-8)
             return encode_vector(yk.half().cpu().numpy())
 
-        def _sphere_k(prev_point_ids, step):
-            codebook = _SPHERE_CODEBOOK.to(
-                device=runner.device, dtype=last_hidden.dtype)
-            sph = random_pick_indices(
-                poc_params.block_hash, poc_params.public_key, [nonce],
-                hidden_size, SPHERE_DIM, runner.device,
-                prev_point_ids=prev_point_ids, step=step)
-            xk_sphere = project_to_sphere(
-                torch.gather(last_hidden.unsqueeze(0), 1, sph))
-            return int(nearest_sphere_index(xk_sphere, codebook)[0])
+        def _sphere_from_idx(sph):
+            """hidden -> sphere index, kept as a [1] int64 TENSOR (no .item(), so
+            the chain stays on the GPU and async scheduling works)."""
+            xk_sphere = project_to_sphere(torch.gather(last_hidden.unsqueeze(0), 1, sph))
+            return nearest_sphere_index(xk_sphere, codebook)  # [1] int64 tensor
 
         if st is None:
             # Prefill-only PoC: just the vector_b64 artifact.
@@ -386,31 +429,66 @@ def process_poc_outputs_from_hidden(
                 nonce=nonce, vector_b64=_vector_b64())
             continue
 
-        if 'decode_step' not in meta:
-            # Prefill step of a decode-PoC: vector_b64 + seed prefill sphere_k
-            # (aligned to the reference when validating).
-            st.vector_b64 = _vector_b64()
-            k0 = _sphere_k(None, 0)
-            st.k_points_steps = [k0]
-            ref0 = st.reference[0] if (st.reference and len(st.reference) > 0) else None
-            delta, st.prev_k = aligned_step(k0, ref0)
-            st.n_sphere_mismatches = delta
+        # Prefill step of a decode-PoC: compute the prefill sphere_k (k0) and start
+        # the on-device trajectory. Decode is scored on k_points_steps; the chain
+        # (prev_k_t) stays on device until end-of-sequence (emit-once).
+        if st.base_seeds is None:
+            st.base_seeds = decode_base_seeds(
+                poc_params.block_hash, poc_params.public_key, [nonce], runner.device)
+        sph0 = random_pick_indices(
+            poc_params.block_hash, poc_params.public_key, [nonce],
+            hidden_size, SPHERE_DIM, runner.device)
+        k0_t = _sphere_from_idx(sph0)                       # [1] tensor
+        st.k_steps_t = [k0_t]
+        st.mismatch_t = torch.zeros(1, dtype=torch.int64, device=runner.device)
+        if st.reference is not None:
+            st.reference_t = torch.tensor(
+                st.reference, dtype=torch.int64, device=runner.device)
+            ref0 = st.reference_t[0:1]
+            st.mismatch_t += (k0_t != ref0).to(torch.int64)
+            st.prev_k_t = ref0                              # aligned (teacher-forced)
         else:
-            # One decode step: compute own sphere_k, then aligned_step counts a
-            # mismatch and seeds prev_k (from the reference when validating).
+            st.prev_k_t = k0_t
+
+    # Batched decode step: one set of GPU ops (seed -> pick -> sphere) for the whole
+    # nonce-batch. Per-row results are identical to the old per-nonce calls (same
+    # seeds, murmur, topk, gather, argmax), so artifacts are unchanged.
+    if decode_metas:
+        device = runner.device
+        H = hidden_states.shape[-1]
+        idxs = [m['start_idx'] + m['length'] - 1 for m in decode_metas]
+        lh = hidden_states[idxs].float()                       # [B, H]
+        lh = lh / (lh.norm(dim=-1, keepdim=True) + 1e-8)
+        base_seeds = torch.cat([m['decode_state'].base_seeds for m in decode_metas])
+        prev_k = torch.cat([m['decode_state'].prev_k_t for m in decode_metas])
+        steps = torch.tensor([m['decode_step'] for m in decode_metas],
+                             dtype=torch.int64, device=device)
+        sph = random_pick_indices_gpu(base_seeds, prev_k, steps, H, SPHERE_DIM, device)
+        k_all = nearest_sphere_index(
+            project_to_sphere(torch.gather(lh, 1, sph)), codebook)   # [B] int64
+
+        for i, meta in enumerate(decode_metas):
+            st = meta['decode_state']
             step = meta['decode_step']
-            k = _sphere_k([st.prev_k], step)
-            st.k_points_steps.append(k)
-            ref = st.reference[step] if (st.reference and step < len(st.reference)) else None
-            delta, st.prev_k = aligned_step(k, ref)
-            st.n_sphere_mismatches += delta
+            k_t = k_all[i:i + 1]                               # [1] tensor (view)
+            st.k_steps_t.append(k_t)
+            if st.reference_t is not None and step < st.reference_t.shape[0]:
+                ref = st.reference_t[step:step + 1]
+                st.mismatch_t += (k_t != ref).to(torch.int64)
+                st.prev_k_t = ref                             # aligned (teacher-forced)
+            else:
+                st.prev_k_t = k_t
             if step >= st.max_tokens:
+                # End-of-sequence: ONE host copy of the whole trajectory + count
+                # (emit-once). This single terminal PoCOutput is what the engine drains.
+                k_points = torch.cat(st.k_steps_t).tolist()
+                n_mismatches = int(st.mismatch_t.item())
                 poc_outputs[meta['req_id']] = PoCOutput(
-                    nonce=nonce,
-                    vector_b64=st.vector_b64,
-                    k_points_steps=st.k_points_steps,
+                    nonce=meta['poc_params'].nonce,
+                    vector_b64="",
+                    k_points_steps=k_points,
                     n_sphere_mismatches=(
-                        st.n_sphere_mismatches if st.reference is not None else -1),
+                        n_mismatches if st.reference is not None else -1),
                 )
                 get_decode_manager(runner).free(meta['req_id'])
 

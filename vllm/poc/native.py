@@ -12,10 +12,48 @@ shared boolean mask buffer. Chat rows pass through unchanged (mask False →
 vectors (one per layer, seeded by block_hash) and the mask live in stable buffers
 updated in-place each round/step, so replay reads the live values.
 """
+import os
+
 import torch
 from torch import nn
 
 from .gpu_random import generate_householder_vector
+
+# Debug-only TP guard (VLLM_POC_DEBUG_TP=1): PoC reflection vectors / embeds are
+# generated per rank from deterministic seeds and MUST be bit-identical across
+# tensor-parallel ranks, else rows reflect/inject differently per rank -> corruption.
+_DEBUG_TP = os.environ.get("VLLM_POC_DEBUG_TP") == "1"
+
+
+def _assert_replicated_across_tp(t: torch.Tensor, name: str) -> None:
+    """No-op unless VLLM_POC_DEBUG_TP=1 and TP world size > 1. Fingerprints `t`
+    (3 moments) and all-gathers across the TP group, asserting bit-equality so a
+    per-rank RNG divergence is caught the moment a TP run hits it."""
+    if not _DEBUG_TP:
+        return
+    try:
+        import torch.distributed as dist
+        from vllm.distributed import (
+            get_tensor_model_parallel_group,
+            get_tensor_model_parallel_world_size,
+        )
+    except ImportError:
+        return
+    if not dist.is_initialized():
+        return
+    ws = get_tensor_model_parallel_world_size()
+    if ws <= 1:
+        return
+    x = t.detach().to(torch.float64).reshape(-1)
+    pos = torch.arange(1, x.numel() + 1, device=x.device, dtype=torch.float64)
+    fp = torch.stack([x.sum(), (x * x).sum(), (x * pos).sum()])
+    gathered = [torch.empty_like(fp) for _ in range(ws)]
+    dist.all_gather(gathered, fp, group=get_tensor_model_parallel_group().device_group)
+    for r in range(1, ws):
+        if not torch.equal(gathered[0], gathered[r]):
+            raise AssertionError(
+                f"PoC '{name}' diverged across TP ranks (rank0 vs rank{r}) — "
+                "per-rank RNG non-determinism; PoC is not TP-safe in this setup")
 
 
 def _reflect(x: torch.Tensor, v: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
@@ -68,9 +106,16 @@ class PoCEmbeddingWrapper(nn.Module):
         self.register_buffer("poc_mask", mask, persistent=False)
 
     def forward(self, input_ids):
+        # PoC rows carry a dummy token id whose embedding is overridden below, but
+        # under async scheduling that id can be a stale/sentinel value (e.g. -1 from
+        # the previous step's sampled-token plumbing) -> out-of-vocab gather crash.
+        # Force masked (PoC) rows to a valid in-vocab id (0); their value is unused.
+        n = input_ids.shape[0]
+        m_rows = self.poc_mask[:n]
+        # On-device clamp (no host sync): masked rows -> 0, chat rows unchanged.
+        input_ids = torch.where(m_rows, torch.zeros_like(input_ids), input_ids)
         out = self.inner(input_ids)
-        n = out.shape[0]
-        m = self.poc_mask[:n].unsqueeze(-1)
+        m = m_rows.unsqueeze(-1)
         return torch.where(m, self.poc_embeds[:n].to(out.dtype), out)
 
 
@@ -97,11 +142,13 @@ class PoCNativeState:
         self.mask = torch.zeros(max_tokens, dtype=torch.bool, device=device)
         self.embeds = torch.zeros(max_tokens, hidden_size, device=device, dtype=dtype)
         self._hash_cache: dict[str, list] = {}      # block_hash -> per-layer vectors
+        self._last_row_hashes: list | None = None   # skip redundant per-step rescatter
 
     def set_embeds(self, row_embeds: torch.Tensor) -> None:
         """Write the PoC rows' input embeds into the buffer (in place)."""
         n = row_embeds.shape[0]
         self.embeds[:n].copy_(row_embeds)
+        _assert_replicated_across_tp(self.embeds[:n], "embeds")
 
     def _vectors_for(self, block_hash: str) -> list:
         """Per-layer reflection vectors for a block_hash (cached across forwards)."""
@@ -120,7 +167,14 @@ class PoCNativeState:
         """Write each row's reflection vectors from ITS OWN block_hash (in place),
         so requests with different block_hashes coexist in one forward. row_hashes[i]
         = block_hash for row i, or None (left zero; masked out). Generation of the
-        vectors is cached per block_hash; the scatter is cheap CPU-side setup."""
+        vectors is cached per block_hash; the scatter is cheap CPU-side setup.
+
+        The reflection vectors depend only on block_hash (not the decode step), so for
+        a stable batch the row->hash mapping is unchanged across all decode steps. Skip
+        the zero + per-(row,layer) copy_ (num_layers x B kernels) when row_hashes
+        matches the last call; the buffers already hold the right values."""
+        if row_hashes == self._last_row_hashes:
+            return
         for buf in self.vectors:
             buf.zero_()
         for row, bh in enumerate(row_hashes):
@@ -129,6 +183,8 @@ class PoCNativeState:
             vs = self._vectors_for(bh)
             for i, buf in enumerate(self.vectors):
                 buf[row].copy_(vs[i].to(buf.dtype))
+        self._last_row_hashes = list(row_hashes)
+        _assert_replicated_across_tp(self.vectors[0], "reflection_vectors[0]")
 
     def set_mask(self, row_mask: torch.Tensor | None) -> None:
         """Set which rows are PoC this forward (in place). None -> all chat."""

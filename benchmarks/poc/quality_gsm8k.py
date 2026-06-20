@@ -9,9 +9,13 @@ from pathlib import Path
 from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import aiohttp
 import numpy as np
+from poc_validation import (  # noqa: E402
+    save_run, env_info, add_engine_args, deploy_from_args,
+)
 
 
 async def _send_poc_request(
@@ -247,7 +251,7 @@ async def _run_eval(args: argparse.Namespace) -> int:
     run_output_path = output_path / run_name
     run_output_path.mkdir(parents=True, exist_ok=True)
 
-    server_url = f"http://{args.host}:{args.port}"
+    server_url = getattr(args, "server_url", None) or f"http://{args.host}:{args.port}"
 
     print("=" * 80)
     print(f"Model     : {args.model_name}")
@@ -363,6 +367,20 @@ async def _run_eval(args: argparse.Namespace) -> int:
 
         stats_file = run_output_path / "run_stats.json"
         stats_file.write_text(json.dumps(run_stats, indent=2))
+
+        # collect-format result (accuracy + provenance) for offline analyze.py
+        if getattr(args, "save", None):
+            gsm = run_stats.get("gsm8k") or {}
+            save_run(args.save,
+                     {"role": "gsm8k", "model": args.model_name, "tasks": args.tasks,
+                      "limit": args.limit, "batch_size": args.batch_size,
+                      "poc_enabled": not args.disable_poc, "poc_max_tokens": poc_max_tokens,
+                      **getattr(args, "prov", {})}, [],
+                     results={"strict_match": gsm.get("strict_match"),
+                              "flexible_extract": gsm.get("flexible_extract"),
+                              "n_samples": args.limit, "elapsed_s": round(elapsed, 1),
+                              "poc_nonces_per_s": run_stats.get("poc_nonces_per_sec")})
+            print(f"saved -> {args.save}")
         print(f"Run stats saved to: {stats_file}")
 
         table_path = Path(args.table_output) if args.table_output else output_path / "results_table.md"
@@ -385,17 +403,24 @@ def main() -> int:
     )
     parser.add_argument("--model_name", type=str)
     parser.add_argument("--batch_size", type=int)
+    add_engine_args(parser)  # --url/--target/--profile/--configs/--eager/--dtype (shared)
     parser.add_argument(
         "--host",
         default=None,
         metavar="IP",
-        help="Server host / IP (default 127.0.0.1). Requires --port.",
+        help="Connect-only host/IP of an ALREADY-running server (with --port; no deploy).",
     )
     parser.add_argument(
         "--port",
         type=int,
         default=None,
-        help="Server port. Provide with --host to use an existing server; omit to auto-launch.",
+        help="Connect-only port of an already-running server (with --host). "
+             "Omit and use --url (remote deploy) or neither (local boot) to deploy.",
+    )
+    parser.add_argument(
+        "--save",
+        default=None,
+        help="Write a collect-format result JSON (accuracy + provenance) for analyze.py.",
     )
     parser.add_argument("--output_path", type=str, default="./eval_results")
     parser.add_argument("--tasks", type=str, default="gsm8k")
@@ -467,17 +492,22 @@ def main() -> int:
     if args.host is not None and args.port is None:
         parser.error("--host requires --port.")
 
+    # connect-only to an ALREADY-running server (no deploy): explicit --host/--port
     if args.port is not None:
         args.host = args.host or "127.0.0.1"
+        args.server_url = f"http://{args.host}:{args.port}"
+        args.prov = dict(env_info())
         return asyncio.run(_run_eval(args))
 
-    from tests.poc._server import PoCTestServer
-
+    # deploy via the shared path (remote --url, or local boot) — same as collect/perf.
+    # gsm8k chat needs more context than PoC's 1024 default, so request a larger
+    # --max-model-len unless the caller already set one via --server-args.
     extra = shlex.split(args.server_args) if args.server_args else []
-    default_args = ["--no-enable-prefix-caching"]
-    with PoCTestServer(args.model_name, extra + default_args) as srv:
-        args.host = srv.host
-        args.port = srv.port
+    if not any(s.startswith("--max-model-len") for s in extra):
+        extra += ["--max-model-len", "4096"]
+    extra += ["--no-enable-prefix-caching"]
+    with deploy_from_args(args, args.model_name, extra_args=extra) as (url, srv):
+        args.server_url = url
         return asyncio.run(_run_eval(args))
 
 

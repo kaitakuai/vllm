@@ -83,9 +83,6 @@ class PoCTestServer:
             "--host", host,
             "--port", str(self.port),
             "--poc-decode",
-            # PoC's step-driven decode + artifact readout is not supported under
-            # async scheduling's execute/sample batch-queue split. Force sync.
-            "--no-async-scheduling",
             *vllm_serve_args,
         ]
 

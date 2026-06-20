@@ -637,6 +637,8 @@ class OutputProcessor:
                 req_state.is_prefilling = False
 
             if poc_output is not None:
+                # PoC emits its artifact ONCE (emit-once): a single finished
+                # output carrying the full trajectory (decode) or vector (prefill).
                 request_output = RequestOutput(
                     request_id=req_id,
                     prompt=None,
@@ -651,7 +653,7 @@ class OutputProcessor:
                 else:
                     request_outputs.append(request_output)
 
-                # Free the request
+                # Free the request.
                 self.request_states.pop(req_id)
                 continue
 

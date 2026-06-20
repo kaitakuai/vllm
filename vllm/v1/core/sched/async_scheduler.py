@@ -20,6 +20,15 @@ class AsyncScheduler(Scheduler):
         spec_decode_tokens = scheduler_output.scheduled_spec_decode_tokens
         for req_id in scheduler_output.num_scheduled_tokens:
             request = self.requests[req_id]
+            # PoC: num_tokens is fixed at seq_len (no output tokens appended), so
+            # the chat is_prefill_chunk heuristic is meaningless. Decode-PoC emits
+            # its artifact ONCE at the final forward (emit-once); add one
+            # placeholder per scheduled step so the request stays alive until that
+            # terminal forward drains (decremented per update in
+            # scheduler.update_from_output's PoC branch -> nets to 0 at finish).
+            if request.poc_params is not None:
+                request.num_output_placeholders += 1
+                continue
             if request.is_prefill_chunk:
                 continue
 

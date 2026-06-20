@@ -224,6 +224,8 @@ hip_compat.h
 
 # Benchmark dataset
 benchmarks/**/*.json
+# but keep the PoC engine-profile config (not a dataset/result)
+!benchmarks/poc/poc_configs.json
 
 # Linting
 actionlint

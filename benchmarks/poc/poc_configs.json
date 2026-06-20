@@ -1,0 +1,51 @@
+{
+    "_about": "Named engine profiles for collect.py / perfomance_nonces.py / quality_gsm8k.py / pair_report.sh (--profile NAME). Each: eager=graph(false)/eager(true); args=extra vllm-serve flags appended to the PoC defaults; env=extra env vars (rarely needed). Attention backend is a SERVE FLAG (--attention-backend, works local AND remote) \u2014 not an env var. deploy_from_args verifies the engaged backend matches the request (fails loudly on silent fallback). Effective config is recorded per-run in provenance.",
+    "cudagraph": {
+        "eager": false,
+        "args": []
+    },
+    "eager": {
+        "eager": true,
+        "args": []
+    },
+    "cg-flashattn": {
+        "eager": false,
+        "args": [
+            "--attention-backend",
+            "FLASH_ATTN"
+        ]
+    },
+    "eager-flashattn": {
+        "eager": true,
+        "args": [
+            "--attention-backend",
+            "FLASH_ATTN"
+        ]
+    },
+    "cg-flashinfer": {
+        "eager": false,
+        "args": [
+            "--attention-backend",
+            "FLASHINFER"
+        ]
+    },
+    "eager-flashinfer": {
+        "eager": true,
+        "args": [
+            "--attention-backend",
+            "FLASHINFER"
+        ]
+    },
+    "eager-noasync": {
+        "eager": true,
+        "args": [
+            "--no-async-scheduling"
+        ]
+    },
+    "cg-noasync": {
+        "eager": false,
+        "args": [
+            "--no-async-scheduling"
+        ]
+    }
+}

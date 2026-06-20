@@ -55,6 +55,8 @@ async def compute_nonce_artifacts(
             debug=debug,
         )
         request_id = f"poc-{uuid.uuid4()}"
+        # PoC emits its artifact ONCE (emit-once): a single finished output
+        # carrying the full trajectory (decode) or vector (prefill).
         try:
             async for output in engine_client.generate(
                 poc_params=poc_params,

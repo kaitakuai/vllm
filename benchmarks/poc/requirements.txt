@@ -1,0 +1,11 @@
+# PoC benchmark tooling deps — install on top of a working vLLM env:
+#   uv pip install -r benchmarks/poc/requirements.txt
+#
+# Core (collect.py / perfomance_nonces.py / analyze.py / pair_report.sh):
+requests
+
+# quality_gsm8k.py (chat-accuracy eval under PoC load). lm_eval also installs the
+# `lm-eval` CLI that the tool shells out to.
+aiohttp
+numpy
+lm_eval
