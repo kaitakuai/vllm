@@ -247,3 +247,9 @@ vllm/grpc/vllm_engine_pb2.pyi
 
 # Ignore generated cpu headers 
 csrc/cpu/cpu_attn_dispatch_generated.h
+
+# decode-PoC benchmark output (local result sessions; never committed —
+# the committed example report lives at benchmarks/poc/example-report.html)
+/runs/
+/results/
+/benchmarks/poc/runs/

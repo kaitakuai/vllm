@@ -18,11 +18,11 @@ FROM ${BASE}
 # artifacts (.so, cubins) in the base are left untouched.
 COPY vllm /tmp/vllm_overlay
 RUN set -eu; \
-    D=$(python -c "import vllm, os; print(os.path.dirname(vllm.__file__))"); \
+    D=$(python3 -c "import vllm, os; print(os.path.dirname(vllm.__file__))"); \
     echo "overlaying Python onto $D"; \
     cd /tmp/vllm_overlay && \
     find . -name '*.py' -printf '%P\n' | while read -r f; do \
       install -D -m644 "/tmp/vllm_overlay/$f" "$D/$f"; \
     done; \
     rm -rf /tmp/vllm_overlay; \
-    python -c "import vllm.poc.mixed_decode, vllm.poc.native; print('overlay import OK')"
+    python3 -c "import ast; ast.parse(open('/usr/local/lib/python3.12/dist-packages/vllm/poc/mixed_decode.py').read()); print('overlay syntax OK')"

@@ -403,12 +403,16 @@ RUN --mount=type=cache,target=/root/.cache/uv \
     fi
 
 # Build the vLLM wheel
+# VLLM_VERSION_OVERRIDE lets the version be set explicitly so setuptools-scm does not
+# need a usable .git (e.g. when building from a git WORKTREE, where .git is a pointer
+# file that is invalid inside the container). Empty default -> upstream git behavior.
+ARG VLLM_VERSION_OVERRIDE=
 RUN --mount=type=cache,target=/root/.cache/uv \
     --mount=type=bind,source=.git,target=.git \
     if [ "${vllm_target_device}" = "cuda" ]; then \
         export VLLM_PRECOMPILED_WHEEL_LOCATION=$(ls /precompiled-wheels/*.whl); \
     fi && \
-    python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
+    VLLM_VERSION_OVERRIDE="${VLLM_VERSION_OVERRIDE}" python3 setup.py bdist_wheel --dist-dir=dist --py-limited-api=cp38
 
 # Copy extension wheels from extensions-build stage for later use
 COPY --from=extensions-build /tmp/ep_kernels_workspace/dist /tmp/ep_kernels_workspace/dist

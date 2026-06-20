@@ -66,6 +66,7 @@ def cmd_validate(a):
     save_run(a.save, meta, [],
              results={"validator_model": a.model, "prover_model": rmeta["model"], "honest": honest,
                       "rate": rate, "n_mismatch": resp["n_mismatch"], "fraud_detected": resp["fraud_detected"],
+                      "prover_gpu": rmeta.get("gpu"),  # prover HW (this run is the validator's HW)
                       "nonces_per_s": round(nps, 3), "elapsed_s": round(secs, 1)})
     print(f"validate {a.model} vs ref {rmeta['model']} ({'honest' if honest else 'fraud'}): "
           f"rate={rate*100:.3f}% fraud={resp['fraud_detected']} {nps:.2f} nonces/s -> {a.save}")

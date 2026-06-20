@@ -254,7 +254,14 @@ def build_app(
 
     from vllm.poc.routes import router as poc_router
 
-    app.include_router(poc_router)
+    # Register PoC routes directly rather than app.include_router(): FastAPI 0.138's
+    # include_router inserts an `_IncludedRouter` into app.routes that
+    # prometheus_fastapi_instrumentator's per-request route-name lookup crashes on
+    # ('_IncludedRouter' object has no attribute 'path'). Direct add keeps them as
+    # normal Route objects. Router routes already carry the full /api/v1/pow prefix.
+    for _poc_route in poc_router.routes:
+        app.add_api_route(_poc_route.path, _poc_route.endpoint,
+                          methods=list(_poc_route.methods), name=_poc_route.name)
     app.state.poc_enabled = True
     app.state.poc_decode = getattr(args, "poc_decode", False)
     logger.info(

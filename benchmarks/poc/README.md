@@ -170,6 +170,27 @@ It prints a comparison table of the two runs (numbers illustrative):
 PoC Batch 0 = baseline (no PoC); the next row runs with PoC load. Accuracy within noise
 ⇒ co-existence holds. `--limit N` runs a fast subset; omit for the full set.
 
+## Reports & session discipline
+`run_model_report.sh` runs the full test matrix for **one model** and renders a
+self-contained HTML report (`report.py`). Result files are organized **one session per
+model** — never a shared flat `runs/`:
+
+```
+runs/<model-slug>__<gpu-slug>__<YYYYMMDD-HHMMSS>/   # one session = one model, one box, one run
+    perf_*.json  gen_*.json  val_*.json  gsm_*/      # all result files for that model
+    report.html                                       # rendered report
+```
+```bash
+run_model_report.sh <honest-model> [fraud-model] --url $S            # full 24-cell matrix
+run_model_report.sh <honest-model> [fraud-model] --scope quick       # fast diagonal sanity
+report.py runs/<session>/ --out runs/<session>/report.html           # (re-)render one session
+report.py runs/ --out all.html                                       # combine many sessions (grouped per model)
+```
+The report has three sections (Performance, Separation honest/fraud, GSM8K co-existence),
+a PASS/FAIL chip, per-section **coverage counts** (adapts to however many pairs were run),
+and a metric glossary. `report.py` groups by model from each file's provenance, so even a
+mixed pile renders one section per model — but **the runner keeps sessions separate on disk**.
+
 ## Configuring vLLM (profiles)
 Engine settings are named profiles in `poc_configs.json`, selected with `--profile`
 (honored by `collect.py` / `perfomance_nonces.py` / `quality_gsm8k.py`;
