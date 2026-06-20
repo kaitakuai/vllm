@@ -83,7 +83,15 @@ class CallbackSender:
                     self._buffer.clear()
                     self._pending_payload = {
                         **self._metadata,
-                        "artifacts": [{"nonce": a.nonce, "vector_b64": a.vector_b64} for a in artifacts_to_send],
+                        # decode PoC: include the sphere_k trajectory; prefill leaves
+                        # it out (key absent) so the payload is byte-unchanged there.
+                        "artifacts": [
+                            ({"nonce": a.nonce, "vector_b64": a.vector_b64}
+                             if a.k_points_steps is None else
+                             {"nonce": a.nonce, "vector_b64": a.vector_b64,
+                              "k_points_steps": a.k_points_steps})
+                            for a in artifacts_to_send
+                        ],
                         "encoding": {"dtype": "f16", "k_dim": self.k_dim, "endian": "le"},
                     }
                     retry_attempt = 0

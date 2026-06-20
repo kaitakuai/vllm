@@ -1,5 +1,8 @@
 # Decode-PoC benchmark tooling
 
+> **Building the images?** See [docker/BUILD-poc.md](../../docker/BUILD-poc.md) — vLLM engine + mlnode, with the
+> fast overlay path for Python-only changes.
+
 ## Purpose
 Client/server tooling to measure **decode-stage Proof-of-Compute** on vLLM across
 models, hardware, and engine configurations. The **server** (any box, local or

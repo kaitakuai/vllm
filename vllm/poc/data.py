@@ -15,9 +15,11 @@ DEFAULT_FRAUD_THRESHOLD = 0.01
 
 @dataclass
 class Artifact:
-    """Single nonce artifact with base64-encoded vector."""
+    """Single nonce artifact. Prefill PoC carries vector_b64; decode PoC carries the
+    sphere_k trajectory (k_points_steps) and leaves vector_b64 empty."""
     nonce: int
     vector_b64: str
+    k_points_steps: Optional[List[int]] = None
 
 
 @dataclass

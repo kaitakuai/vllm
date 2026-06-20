@@ -308,13 +308,17 @@ async def _generation_loop(
             nonces = pending_nonces if pending_nonces else nonce_iter.take(batch_size)
             
             try:
-                # Continuous generation is prefill-only (no decode loop). PoC
-                # rides through the scheduler alongside chat; no collective_rpc.
+                # Continuous generation: prefill-only when max_tokens==0 (default),
+                # or decode-PoC (sphere_k trajectory) when max_tokens>0. PoC rides
+                # through the scheduler alongside chat; no collective_rpc.
+                mt = config.get("max_tokens", 0)
                 artifacts = await _compute_artifacts_chunk(
                     engine_client, nonces,
                     config["block_hash"], config["public_key"],
                     config["seq_len"], config["k_dim"],
                     config["poc_stronger_rng"],
+                    poc_decode=mt > 0,
+                    max_tokens=mt,
                     block_height=config["block_height"],
                 )
             except Exception as e:
@@ -329,7 +333,9 @@ async def _generation_loop(
             pending_nonces = None
 
             if artifacts and callback_sender:
-                artifact_objs = [Artifact(nonce=a["nonce"], vector_b64=a["vector_b64"]) for a in artifacts]
+                artifact_objs = [Artifact(nonce=a["nonce"], vector_b64=a["vector_b64"],
+                                          k_points_steps=a.get("k_points_steps"))
+                                 for a in artifacts]
                 callback_sender.add_artifacts(artifact_objs, {
                     "public_key": config["public_key"],
                     "block_hash": config["block_hash"],
@@ -382,6 +388,7 @@ async def init_generate(request: Request, body: PoCInitGenerateRequest) -> dict:
         "n_groups": body.n_groups,
         "batch_size": body.batch_size,
         "seq_len": body.params.seq_len,
+        "max_tokens": body.params.max_tokens,
         "k_dim": body.params.k_dim,
         "poc_stronger_rng": body.poc_stronger_rng,
     }
