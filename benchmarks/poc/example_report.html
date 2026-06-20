@@ -1,0 +1,98 @@
+<!doctype html><meta charset=utf-8><title>Decode-PoC report</title><style>
+:root{--ink:#0f172a;--mut:#64748b;--line:#e2e8f0;--bg:#f8fafc;
+  --blue:#3b82f6;--green:#16a34a;--red:#dc2626;--amber:#d97706}
+*{box-sizing:border-box}
+body{font:14px/1.55 -apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,system-ui,sans-serif;
+  margin:0;padding:2.5rem 1.5rem;color:var(--ink);background:var(--bg)}
+.wrap{max-width:1120px;margin:0 auto}
+.card{background:#fff;border:1px solid var(--line);border-radius:14px;padding:1.4rem 1.6rem;
+  margin:0 0 1.4rem;box-shadow:0 1px 3px rgba(15,23,42,.04),0 8px 24px rgba(15,23,42,.03)}
+.head{display:flex;align-items:center;justify-content:space-between;gap:1rem;flex-wrap:wrap}
+h1{font-size:1.35rem;font-weight:700;margin:0;letter-spacing:-.01em}
+.prov{color:var(--mut);font-size:.82rem;margin:.4rem 0 0;font-variant-numeric:tabular-nums}
+h2{font-size:.78rem;font-weight:700;color:var(--mut);text-transform:uppercase;letter-spacing:.06em;
+  margin:1.7rem 0 .5rem;display:flex;align-items:baseline;gap:.6rem}
+.card h2:first-of-type{margin-top:0}
+table{border-collapse:collapse;width:100%;font-variant-numeric:tabular-nums}
+th{font-size:.7rem;font-weight:600;color:var(--mut);text-transform:uppercase;letter-spacing:.04em;
+  text-align:left;padding:.35rem .7rem;border-bottom:2px solid var(--line)}
+td{padding:.4rem .7rem;border-bottom:1px solid var(--line)}
+tbody tr:hover{background:#f1f5f9}
+.num{text-align:right}
+.bar{width:200px;padding-right:0}
+.track{position:relative;display:block;height:14px;background:#eef2f7;border-radius:7px;overflow:hidden}
+.fill{position:absolute;left:0;top:0;height:100%;border-radius:7px}
+.fill.perf{background:linear-gradient(90deg,#60a5fa,#3b82f6)}
+.fill.honest{background:linear-gradient(90deg,#4ade80,#16a34a)}
+.fill.fraud{background:linear-gradient(90deg,#f87171,#dc2626)}
+.mark{position:absolute;top:-2px;height:18px;width:2px;background:#0f172a;opacity:.55;z-index:2}
+.chip{display:inline-block;padding:.18rem .7rem;border-radius:999px;font-size:.78rem;font-weight:700;letter-spacing:.02em}
+.pass{background:#dcfce7;color:#166534} .fail{background:#fee2e2;color:#991b1b}
+.cov{font-size:.72rem;font-weight:500;color:var(--mut);text-transform:none;letter-spacing:0}
+tr.honest td:nth-child(4){color:var(--green);font-weight:600}
+tr.fraud td:nth-child(4){color:var(--red);font-weight:600}
+tr.cross td:nth-child(4){color:var(--amber);font-weight:600}
+tr.cross{background:#fffbeb}
+.note{font-size:.78rem;color:var(--mut);line-height:1.55;background:#fffbeb;
+  border-left:3px solid var(--amber);padding:.55rem .8rem;border-radius:6px;margin:.6rem 0}
+.note b{color:#92400e}
+.na{color:#94a3b8;font-style:italic;font-size:.85rem}
+.highlight{background:#ecfdf5;border-left:3px solid #10b981;padding:.55rem .8rem;border-radius:6px;margin:.6rem 0;font-size:.95rem}
+.highlight b{color:#065f46}
+.gloss{color:var(--mut);font-size:.8rem;line-height:1.6;margin-top:.5rem}
+ul.gloss{margin:.3rem 0 0;padding-left:1.1rem} ul.gloss li{margin:.35rem 0}
+code{background:#f1f5f9;padding:.05rem .35rem;border-radius:4px;font-size:.9em}
+.gloss b{color:var(--ink)}
+.foot{text-align:center;color:#94a3b8;font-size:.75rem;margin:1rem 0}
+</style>
+<div class=wrap>
+<div class=card>
+<div class=head><h1>RedHatAI/Qwen2.5-7B-Instruct-quantized.w8a16</h1><span class='chip pass'>PASS</span></div>
+<div class=prov>decode-PoC · 0f6126af16ab · bfloat16 · compressed-tensors</div>
+<h2>Performance <span class=cov>4 config(s)</span></h2><p class=highlight>Best <b>cudagraph</b> 204 nonces/min vs best <b>eager</b> 180 nonces/min &mdash; cudagraph is <b>+13.5%</b></p>
+<table><tr><th>hardware</th><th>engine</th><th>attention</th><th>max_tok</th><th>nonces/min</th><th>steps/s</th><th></th></tr>
+<tr><td>RTX 4000 SFF Ada Generation</td><td>cudagraph</td><td>FLASH_ATTN</td><td>256</td><td class=num>204</td><td class=num>873</td><td class=bar><span class=track><span class='fill perf' style='width:100.0%'></span></span></td></tr>
+<tr><td>RTX 4000 SFF Ada Generation</td><td>cudagraph</td><td>FLASHINFER</td><td>256</td><td class=num>204</td><td class=num>872</td><td class=bar><span class=track><span class='fill perf' style='width:99.9%'></span></span></td></tr>
+<tr><td>RTX 4000 SFF Ada Generation</td><td>eager</td><td>FLASH_ATTN</td><td>256</td><td class=num>180</td><td class=num>770</td><td class=bar><span class=track><span class='fill perf' style='width:88.1%'></span></span></td></tr>
+<tr><td>RTX 4000 SFF Ada Generation</td><td>eager</td><td>FLASHINFER</td><td>256</td><td class=num>180</td><td class=num>769</td><td class=bar><span class=track><span class='fill perf' style='width:88.0%'></span></span></td></tr>
+</table>
+<h2>Separation — honest vs fraud <span class=cov>24 pair(s): 16 honest, 8 fraud</span></h2><table><tr><th>hardware (val ⇐ prover)</th><th>config (val ⇐ prover)</th><th>model (val ⇐ prover)</th><th>kind</th><th>rate</th><th>verdict</th><th></th></tr>
+<tr class=honest><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>eager/FA ⇐ eager/FA</td><td>RedHatAI/Qwen2.5-7B… ⇐ RedHatAI/Qwen2.5-7B…</td><td>honest</td><td class=num>0.00%</td><td class=num>ok</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill honest' style='width:0.0%'></span></span></td></tr>
+<tr class=honest><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>eager/FI ⇐ eager/FI</td><td>RedHatAI/Qwen2.5-7B… ⇐ RedHatAI/Qwen2.5-7B…</td><td>honest</td><td class=num>0.00%</td><td class=num>ok</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill honest' style='width:0.0%'></span></span></td></tr>
+<tr class=honest><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>graph/FA ⇐ graph/FA</td><td>RedHatAI/Qwen2.5-7B… ⇐ RedHatAI/Qwen2.5-7B…</td><td>honest</td><td class=num>0.23%</td><td class=num>ok</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill honest' style='width:0.2%'></span></span></td></tr>
+<tr class=honest><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>graph/FI ⇐ graph/FI</td><td>RedHatAI/Qwen2.5-7B… ⇐ RedHatAI/Qwen2.5-7B…</td><td>honest</td><td class=num>0.41%</td><td class=num>ok</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill honest' style='width:0.4%'></span></span></td></tr>
+<tr class=honest><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>eager/FA ⇐ graph/FA</td><td>RedHatAI/Qwen2.5-7B… ⇐ RedHatAI/Qwen2.5-7B…</td><td>honest</td><td class=num>4.64%</td><td class=num>ok</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill honest' style='width:4.6%'></span></span></td></tr>
+<tr class=honest><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>graph/FI ⇐ eager/FI</td><td>RedHatAI/Qwen2.5-7B… ⇐ RedHatAI/Qwen2.5-7B…</td><td>honest</td><td class=num>4.86%</td><td class=num>ok</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill honest' style='width:4.9%'></span></span></td></tr>
+<tr class=honest><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>graph/FA ⇐ eager/FA</td><td>RedHatAI/Qwen2.5-7B… ⇐ RedHatAI/Qwen2.5-7B…</td><td>honest</td><td class=num>4.88%</td><td class=num>ok</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill honest' style='width:4.9%'></span></span></td></tr>
+<tr class=honest><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>eager/FI ⇐ graph/FI</td><td>RedHatAI/Qwen2.5-7B… ⇐ RedHatAI/Qwen2.5-7B…</td><td>honest</td><td class=num>4.99%</td><td class=num>ok</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill honest' style='width:5.0%'></span></span></td></tr>
+<tr class=cross><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>eager/FI ⇐ eager/FA</td><td>RedHatAI/Qwen2.5-7B… ⇐ RedHatAI/Qwen2.5-7B…</td><td>honest·x-backend</td><td class=num>16.34%</td><td class=num>pin-backend</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill honest' style='width:16.3%'></span></span></td></tr>
+<tr class=cross><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>eager/FA ⇐ eager/FI</td><td>RedHatAI/Qwen2.5-7B… ⇐ RedHatAI/Qwen2.5-7B…</td><td>honest·x-backend</td><td class=num>16.42%</td><td class=num>pin-backend</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill honest' style='width:16.4%'></span></span></td></tr>
+<tr class=cross><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>graph/FI ⇐ eager/FA</td><td>RedHatAI/Qwen2.5-7B… ⇐ RedHatAI/Qwen2.5-7B…</td><td>honest·x-backend</td><td class=num>16.56%</td><td class=num>pin-backend</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill honest' style='width:16.6%'></span></span></td></tr>
+<tr class=cross><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>eager/FA ⇐ graph/FI</td><td>RedHatAI/Qwen2.5-7B… ⇐ RedHatAI/Qwen2.5-7B…</td><td>honest·x-backend</td><td class=num>16.77%</td><td class=num>pin-backend</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill honest' style='width:16.8%'></span></span></td></tr>
+<tr class=cross><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>graph/FA ⇐ graph/FI</td><td>RedHatAI/Qwen2.5-7B… ⇐ RedHatAI/Qwen2.5-7B…</td><td>honest·x-backend</td><td class=num>16.79%</td><td class=num>pin-backend</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill honest' style='width:16.8%'></span></span></td></tr>
+<tr class=cross><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>graph/FI ⇐ graph/FA</td><td>RedHatAI/Qwen2.5-7B… ⇐ RedHatAI/Qwen2.5-7B…</td><td>honest·x-backend</td><td class=num>16.82%</td><td class=num>pin-backend</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill honest' style='width:16.8%'></span></span></td></tr>
+<tr class=cross><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>graph/FA ⇐ eager/FI</td><td>RedHatAI/Qwen2.5-7B… ⇐ RedHatAI/Qwen2.5-7B…</td><td>honest·x-backend</td><td class=num>17.34%</td><td class=num>pin-backend</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill honest' style='width:17.3%'></span></span></td></tr>
+<tr class=cross><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>eager/FI ⇐ graph/FA</td><td>RedHatAI/Qwen2.5-7B… ⇐ RedHatAI/Qwen2.5-7B…</td><td>honest·x-backend</td><td class=num>17.63%</td><td class=num>pin-backend</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill honest' style='width:17.6%'></span></span></td></tr>
+<tr class=fraud><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>eager/FA ⇐ graph/FI</td><td>RedHatAI/Qwen2.5-7B… ⇐ Qwen/Qwen2.5-7B-Ins…</td><td>fraud</td><td class=num>32.34%</td><td class=num>ok</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill fraud' style='width:32.3%'></span></span></td></tr>
+<tr class=fraud><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>eager/FI ⇐ graph/FI</td><td>RedHatAI/Qwen2.5-7B… ⇐ Qwen/Qwen2.5-7B-Ins…</td><td>fraud</td><td class=num>33.04%</td><td class=num>ok</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill fraud' style='width:33.0%'></span></span></td></tr>
+<tr class=fraud><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>graph/FI ⇐ graph/FI</td><td>RedHatAI/Qwen2.5-7B… ⇐ Qwen/Qwen2.5-7B-Ins…</td><td>fraud</td><td class=num>33.16%</td><td class=num>ok</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill fraud' style='width:33.2%'></span></span></td></tr>
+<tr class=fraud><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>graph/FA ⇐ graph/FI</td><td>RedHatAI/Qwen2.5-7B… ⇐ Qwen/Qwen2.5-7B-Ins…</td><td>fraud</td><td class=num>33.22%</td><td class=num>ok</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill fraud' style='width:33.2%'></span></span></td></tr>
+<tr class=fraud><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>eager/FA ⇐ graph/FA</td><td>RedHatAI/Qwen2.5-7B… ⇐ Qwen/Qwen2.5-7B-Ins…</td><td>fraud</td><td class=num>33.66%</td><td class=num>ok</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill fraud' style='width:33.7%'></span></span></td></tr>
+<tr class=fraud><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>graph/FA ⇐ graph/FA</td><td>RedHatAI/Qwen2.5-7B… ⇐ Qwen/Qwen2.5-7B-Ins…</td><td>fraud</td><td class=num>33.80%</td><td class=num>ok</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill fraud' style='width:33.8%'></span></span></td></tr>
+<tr class=fraud><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>eager/FI ⇐ graph/FA</td><td>RedHatAI/Qwen2.5-7B… ⇐ Qwen/Qwen2.5-7B-Ins…</td><td>fraud</td><td class=num>38.06%</td><td class=num>ok</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill fraud' style='width:38.1%'></span></span></td></tr>
+<tr class=fraud><td>RTX 4000 SFF Ada Generation ⇐ RTX 4000 SFF Ada Generation</td><td>graph/FI ⇐ graph/FA</td><td>RedHatAI/Qwen2.5-7B… ⇐ Qwen/Qwen2.5-7B-Ins…</td><td>fraud</td><td class=num>38.44%</td><td class=num>ok</td><td class=bar><span class=track><span class=mark style='left:10.0%'></span><span class='fill fraud' style='width:38.4%'></span></span></td></tr>
+</table>
+<p class=note><b>Backend pinning:</b> rows marked <code>honest·x-backend</code> validate an honest run across <em>different</em> attention backends (FlashAttention ⇄ FlashInfer). Their elevated rate is <em>expected</em> — the kernels are not bit-identical and the per-step <code>sphere_k</code> chain compounds tiny FP deltas over the trajectory. They are <em>not</em> counted as failures: production pins the attention backend (prover &amp; validator match), where honest ≈ 0. cudagraph vs eager is invariant (same kernel). Fraud is caught in <em>every</em> config.</p>
+<h2>p_mismatch calibration <span class=cov>feasible threshold window</span></h2><table><tr><th>model</th><th>honest same-be (max)</th><th>honest x-be (max)</th><th>fraud (min)</th><th>feasible p_mismatch</th><th>recommended</th><th>separable</th></tr>
+<tr><td>RedHatAI/Qwen2.5-7B-Instruc…</td><td class=num>4.99%</td><td class=num>17.63%</td><td class=num>32.34%</td><td>(17.63%, 32.34%)</td><td class=num>23.9%</td><td>YES</td></tr>
+</table>
+<p class=gloss><b>p_mismatch is not baked in</b> &mdash; production loads it per-model from chain <code>PoCStatTestParams</code> (decentralized-api <code>validator.go</code> &rarr; <code>StatTestParamsFromChain</code> &rarr; vLLM <code>stat_test</code>). This table sets that value from measured rates: any <code>p_mismatch</code> in (honest_max, fraud_min) separates. Recommended = geometric mean of the bounds. Backend-pinned uses honest same-be (tiny) &rarr; widest margin; heterogeneous uses honest x-be. <code>NO gap</code> = honest &ge; fraud, not separable at this config.</p>
+<h2>Co-existence — GSM8K <span class=cov>4 run(s)</span></h2><table><tr><th>hardware</th><th>engine</th><th>PoC load</th><th>strict</th><th>flex</th></tr>
+<tr><td>RTX 4000 SFF Ada Generation</td><td>eager</td><td>pure chat (no PoC)</td><td class=num>17.00%</td><td class=num>76.00%</td></tr>
+<tr><td>RTX 4000 SFF Ada Generation</td><td>eager</td><td>+ 32 PoC (256 decode steps)</td><td class=num>19.00%</td><td class=num>77.00%</td></tr>
+<tr><td>RTX 4000 SFF Ada Generation</td><td>cudagraph</td><td>pure chat (no PoC)</td><td class=num>13.00%</td><td class=num>74.00%</td></tr>
+<tr><td>RTX 4000 SFF Ada Generation</td><td>cudagraph</td><td>+ 32 PoC (256 decode steps)</td><td class=num>14.00%</td><td class=num>76.00%</td></tr>
+</table>
+</div>
+<div class=card><h2>How to read</h2><ul class=gloss><li><b>Performance</b> — <i>nonces/min</i> decode-PoC throughput (higher is better); the bar is relative to the fastest config in the table.</li><li><b>Separation</b> — <i>rate</i> = Σ sphere_k mismatches / (nonces × (max_tokens+1)); the vertical marker on the bar is the <i>p_mismatch</i> cutoff. <span style='color:var(--green)'><b>honest</b></span> (same model) must be ≈ 0 and fraud = False; <span style='color:var(--red)'><b>fraud</b></span> (different model) must be above the cutoff and fraud = True.</li><li><b>Co-existence</b> — GSM8K accuracy with PoC load vs the <code>--disable_poc</code> baseline; co-existence holds when the two are within noise.</li><li><b>Config-invariance</b> — engine (eager / cudagraph) and attention (FlashAttention / FlashInfer) produce byte-identical trajectories, so separation does not depend on configuration.</li><li><b>Hardware</b> is shown per row — a single report may span multiple GPUs (e.g. prover and validator on different hardware).</li></ul></div>
+</div>

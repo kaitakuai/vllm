@@ -3,9 +3,11 @@
 #
 # Core (collect.py / perfomance_nonces.py / analyze.py / pair_report.sh):
 requests
+httpx
 
-# quality_gsm8k.py (chat-accuracy eval under PoC load). lm_eval also installs the
-# `lm-eval` CLI that the tool shells out to.
+# quality_gsm8k.py (chat-accuracy eval under PoC load). The [api] extra pulls
+# tenacity etc. that lm_eval's local-chat-completions HTTP model requires; lm_eval
+# also installs the `lm-eval` CLI that the tool shells out to.
 aiohttp
 numpy
-lm_eval
+lm_eval[api]

@@ -429,6 +429,7 @@ class Scheduler(SchedulerInterface):
             consecutive_defers=getattr(self, "_poc_consecutive_defers", 0),
         )
 
+
         # First, schedule the RUNNING requests.
         req_index = 0
         while req_index < len(self.running) and token_budget > 0:
@@ -465,9 +466,9 @@ class Scheduler(SchedulerInterface):
                 # num_output_placeholders) until the terminal forward's artifact
                 # drains; finish is artifact-driven in update_from_output, never
                 # num_computed-gated (which would strand the artifact under async).
-                if (pp.max_tokens > 0
-                        and request.num_computed_tokens
-                        >= pp.seq_len + pp.max_tokens):
+                # Applies to prefill-only PoC too (max_tokens=0 -> stop at seq_len):
+                # otherwise it gets re-scheduled into a stray decode step.
+                if request.num_computed_tokens >= pp.seq_len + pp.max_tokens:
                     req_index += 1
                     continue
                 num_new_tokens = poc_step_num_tokens(

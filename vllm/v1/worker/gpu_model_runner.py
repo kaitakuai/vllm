@@ -392,6 +392,8 @@ class ExecuteModelState(NamedTuple):
     cudagraph_stats: CUDAGraphStat | None
     slot_mappings: dict[str, torch.Tensor] | list[dict[str, torch.Tensor]] | None
     mixed_batch_info: dict | None = None
+    # Snapshot aligned with this step's logits (next step rebuilds the live one).
+    sampling_metadata: SamplingMetadata | None = None
 
 
 class GPUModelRunner(
@@ -3335,103 +3337,69 @@ class GPUModelRunner(
     def _compute_logits_with_poc_filter(
             self,
             sample_hidden_states: torch.Tensor,
-    ) -> torch.Tensor:
-        mixed_batch_info = getattr(self, '_mixed_batch_info', None)
-        if not (mixed_batch_info and mixed_batch_info.get('poc_req_ids')):
+    ) -> torch.Tensor | None:
+        # PoC scores hidden states (sphere_k), not logits - never run the LM head for
+        # PoC rows. Compute logits for CHAT rows only; all-PoC skips the head entirely.
+        mbi = getattr(self, '_mixed_batch_info', None)
+        if mbi is None:
             return self.model.compute_logits(sample_hidden_states)
-
-        poc_req_ids = mixed_batch_info['poc_req_ids']
-        req_ids = mixed_batch_info.get('req_ids_snapshot', self.input_batch.req_ids)
-        num_reqs = len(req_ids)
-        num_samples = sample_hidden_states.shape[0]
-
-        if num_samples != num_reqs:
-            logger.warning(
-                f"PoC logits filter: sample_hidden_states={num_samples} "
-                f"!= num_reqs={num_reqs}, skipping filter"
-            )
-            return self.model.compute_logits(sample_hidden_states)
-
-        chat_mask = torch.tensor(
-            [req_id not in poc_req_ids for req_id in req_ids[:num_reqs]],
-            dtype=torch.bool,
-            device=sample_hidden_states.device
-        )
-
-        if chat_mask.any():
-            chat_hidden_states = sample_hidden_states[chat_mask]
-            chat_logits = self.model.compute_logits(chat_hidden_states)
-            logits = torch.zeros(
-                (num_reqs, chat_logits.shape[-1]),
-                dtype=chat_logits.dtype,
-                device=chat_logits.device
-            )
-            logits[chat_mask] = chat_logits
-            return logits
-
-        vocab_size = self.model_config.get_vocab_size()
-        return torch.zeros(
-            (num_reqs, vocab_size),
-            dtype=sample_hidden_states.dtype,
-            device=sample_hidden_states.device
-        )
+        chat_rows = mbi['chat_rows']
+        if not chat_rows:
+            return None
+        idx = torch.tensor(chat_rows, device=sample_hidden_states.device,
+                           dtype=torch.long)
+        return self.model.compute_logits(sample_hidden_states[idx])
 
     def _sample(
         self,
         logits: torch.Tensor | None,
         spec_decode_metadata: SpecDecodeMetadata | None,
+        sampling_metadata_snapshot: SamplingMetadata | None = None,
     ) -> SamplerOutput:
-        # Sample the next token and get logprobs if needed.
-        sampling_metadata = self.input_batch.sampling_metadata
-
-        # Filter out PoC requests from sampling
-        mixed_batch_info = getattr(self, '_mixed_batch_info', None)
-        chat_mask = None
-        chat_indices = None
-        num_total_reqs = logits.shape[0] if logits is not None else 0
-
-        if mixed_batch_info and mixed_batch_info.get('poc_req_ids') and logits is not None:
-            poc_req_ids = mixed_batch_info['poc_req_ids']
-            req_ids = mixed_batch_info.get('req_ids_snapshot', self.input_batch.req_ids)
-
-            # Create mask for chat requests
-            chat_indices = [i for i, req_id in enumerate(req_ids) if req_id not in poc_req_ids]
-
-            # All-PoC batch (no chat): skip the sampler entirely (empty batch
-            # trips its all_greedy/all_random assert, and there are no chat rows
-            # to filter); PoC emits vectors, not tokens.
-            if len(chat_indices) == 0:
-                return SamplerOutput(
-                    sampled_token_ids=torch.zeros(
-                        (num_total_reqs, 1), dtype=torch.long, device=self.device),
-                    logprobs_tensors=None,
-                )
-            # Mixed batch (some chat + some PoC): filter PoC rows out of sampling.
-            if len(chat_indices) < len(req_ids):
-                chat_mask = torch.tensor(
-                    [req_id not in poc_req_ids for req_id in req_ids],
-                    dtype=torch.bool,
-                    device=logits.device
-                )
-                logits = logits[chat_mask]
-                sampling_metadata = mixed_decode.filter_sampling_metadata_for_chat(
-                    sampling_metadata, chat_mask, chat_indices
-                )
+        # Use the snapshot from execute_model() time; reading live desyncs under async
+        # (next step rebuilds sampling_metadata before this step's sample_tokens()).
+        sampling_metadata = (
+            sampling_metadata_snapshot
+            if sampling_metadata_snapshot is not None
+            else self.input_batch.sampling_metadata
+        )
 
         # Update output token ids with tokens sampled in last step
         # if async scheduling and required by current sampling params.
         self.input_batch.update_async_output_token_ids()
+
+        # PoC rows carry no sampling semantics. Sample CHAT ROWS ONLY (against the
+        # fresh chat-only metadata snapshot), then scatter chat tokens back into a
+        # full natural-order tensor (PoC slots = 0, never read by the scheduler).
+        # Keeps PoC out of the sampler entirely and leaves bookkeeping/KV untouched.
+        mixed_batch_info = getattr(self, '_mixed_batch_info', None)
+        chat_rows = mixed_batch_info.get('chat_rows') if mixed_batch_info else None
+        if chat_rows is not None and spec_decode_metadata is None:
+            n_full = mixed_batch_info['num_reqs_snapshot']
+            if not chat_rows:  # all-PoC: no logits computed, no tokens produced
+                return SamplerOutput(
+                    sampled_token_ids=torch.zeros(
+                        (n_full, 1), dtype=torch.long, device=self.device),
+                    logprobs_tensors=None,
+                )
+            # logits is already chat-only (LM head ran on chat rows only).
+            chat_out = self.sampler(
+                logits=logits, sampling_metadata=sampling_metadata)
+            idx = torch.tensor(chat_rows, device=self.device, dtype=torch.long)
+            full = torch.zeros(
+                (n_full, chat_out.sampled_token_ids.shape[1]),
+                dtype=chat_out.sampled_token_ids.dtype, device=self.device)
+            full[idx] = chat_out.sampled_token_ids
+            return SamplerOutput(
+                sampled_token_ids=full,
+                logprobs_tensors=chat_out.logprobs_tensors,
+            )
+
         if spec_decode_metadata is None:
             sampler_output = self.sampler(
                 logits=logits,
                 sampling_metadata=sampling_metadata,
             )
-
-            if chat_mask is not None and chat_indices is not None:
-                sampler_output = mixed_decode.expand_sampler_output_for_poc(
-                    sampler_output, chat_mask, chat_indices, num_total_reqs
-                )
-
             return sampler_output
 
         # Update spec_token_ids with real draft tokens from pre step only when
@@ -3481,7 +3449,6 @@ class GPUModelRunner(
         # This is important when using async scheduling.
         req_ids_output_copy = self.input_batch.req_ids.copy()
         req_id_to_index_output_copy = self.input_batch.req_id_to_index.copy()
-
         num_sampled_tokens = sampler_output.sampled_token_ids.shape[0]
         sampled_token_ids = sampler_output.sampled_token_ids
         logprobs_tensors = sampler_output.logprobs_tensors
@@ -3525,6 +3492,7 @@ class GPUModelRunner(
                 if i not in invalid_req_indices_set
             }
 
+
         # Cache the sampled tokens in the model runner, so that the scheduler
         # doesn't need to send them back.
         # NOTE(woosuk): As an exception, when using PP, the scheduler sends
@@ -3564,23 +3532,10 @@ class GPUModelRunner(
             scheduler_output.num_scheduled_tokens,
         )
 
-        # Filter PoC requests out of output arrays so indices stay consistent.
-        mixed_batch_info = getattr(self, '_mixed_batch_info', None)
-        if mixed_batch_info and mixed_batch_info.get('poc_req_ids'):
-            poc_req_ids = mixed_batch_info['poc_req_ids']
-            chat_indices = [
-                i for i, rid in enumerate(req_ids_output_copy)
-                if rid not in poc_req_ids
-            ]
-            req_ids_output_copy = [req_ids_output_copy[i] for i in chat_indices]
-            req_id_to_index_output_copy = {
-                rid: new_i for new_i, rid in enumerate(req_ids_output_copy)
-            }
-            if valid_sampled_token_ids:
-                valid_sampled_token_ids = [
-                    valid_sampled_token_ids[i] for i in chat_indices
-                ]
-
+        # PoC rows stay in the output arrays at their natural input_batch index
+        # (the scheduler handles PoC on its own branch and never reads their
+        # sampled token). Re-indexing the map to chat-only would desync chat rows
+        # from the full-order token tensor under async - that was the corruption.
         return (
             num_nans_in_logits,
             logprobs_lists,
@@ -3988,6 +3943,10 @@ class GPUModelRunner(
                 'poc_req_ids': poc_req_ids,
                 'req_ids_snapshot': list(self.input_batch.req_ids),
                 'num_reqs_snapshot': self.input_batch.num_reqs,
+                'chat_rows': [
+                    i for i, rid in enumerate(self.input_batch.req_ids)
+                    if rid not in poc_req_ids
+                ],
             } if is_mixed_batch else None
 
             if has_ec_transfer() and not get_ec_transfer().is_consumer:
@@ -4335,6 +4294,19 @@ class GPUModelRunner(
                 assert broadcasted is not None
                 logits = broadcasted["logits"]
 
+        # Snapshot the sampling view for this step's batch. For mixed batches build a
+        # FRESH chat-only metadata (the cached one can be stale-sized after PoC churn,
+        # and PoC rows must stay out of the sampler).
+        _mbi = getattr(self, '_mixed_batch_info', None)
+        if _mbi is not None and _mbi['chat_rows']:
+            # Only genuinely-mixed steps pay the fresh chat-only rebuild; all-PoC
+            # steps skip the sampler entirely (the live metadata is unused).
+            sampling_metadata_snap = mixed_decode.slice_sampling_metadata(
+                self.input_batch._make_sampling_metadata(),
+                _mbi['chat_rows'], self.device)
+        else:
+            sampling_metadata_snap = self.input_batch.sampling_metadata
+
         self.execute_model_state = ExecuteModelState(
             scheduler_output,
             logits,
@@ -4346,7 +4318,8 @@ class GPUModelRunner(
             ec_connector_output,
             cudagraph_stats,
             slot_mappings,
-            mixed_batch_info=getattr(self, '_mixed_batch_info', None),
+            mixed_batch_info=_mbi,
+            sampling_metadata=sampling_metadata_snap,
         )
         self.kv_connector_output = kv_connector_output
 
@@ -4399,6 +4372,7 @@ class GPUModelRunner(
             cudagraph_stats,
             slot_mappings,
             mixed_batch_info,
+            sampling_metadata,
         ) = self.execute_model_state
         # Clear ephemeral state.
         self.execute_model_state = None
@@ -4411,7 +4385,8 @@ class GPUModelRunner(
             )
 
         with record_function_or_nullcontext("gpu_model_runner: sample"):
-            sampler_output = self._sample(logits, spec_decode_metadata)
+            sampler_output = self._sample(
+                logits, spec_decode_metadata, sampling_metadata)
 
         self._update_states_after_model_execute(
             sampler_output.sampled_token_ids, scheduler_output

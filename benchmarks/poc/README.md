@@ -186,10 +186,19 @@ run_model_report.sh <honest-model> [fraud-model] --scope quick       # fast diag
 report.py runs/<session>/ --out runs/<session>/report.html           # (re-)render one session
 report.py runs/ --out all.html                                       # combine many sessions (grouped per model)
 ```
-The report has three sections (Performance, Separation honest/fraud, GSM8K co-existence),
-a PASS/FAIL chip, per-section **coverage counts** (adapts to however many pairs were run),
-and a metric glossary. `report.py` groups by model from each file's provenance, so even a
-mixed pile renders one section per model — but **the runner keeps sessions separate on disk**.
+The report has these sections — **Performance** (cudagraph-vs-eager throughput, with the
+speedup %), **Separation** (honest vs fraud), **p_mismatch calibration** (the feasible
+per-model threshold window derived from measured rates — `p_mismatch` is not baked in; prod
+loads it per-model from chain `PoCStatTestParams`), and **GSM8K co-existence** (pure chat vs
++PoC, on cudagraph and eager) — plus a PASS/FAIL chip, per-section **coverage counts**, and a
+metric glossary. `report.py` groups by model from each file's provenance, so even a mixed pile
+renders one section per model — but **the runner keeps sessions separate on disk**.
+
+**Example report:** [`example_report.html`](example_report.html) — a real prod-config run
+(Qwen2.5-7B w8a16 honest vs AWQ fraud, RTX 4000 Ada, `nonces=32 max_tokens=256`): cudagraph
+**+13.5%** over eager, separation ladder (honest same-backend ≈0.3% / cross-backend ≈17% vs
+fraud ≈33%), the p_mismatch calibration window, and 4-run GSM8K co-existence (PoC ≈ baseline
+on both engines). Self-contained HTML — open it directly.
 
 ## Configuring vLLM (profiles)
 Engine settings are named profiles in `poc_configs.json`, selected with `--profile`

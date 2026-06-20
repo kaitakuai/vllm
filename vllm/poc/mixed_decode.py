@@ -27,6 +27,44 @@ logger = init_logger(__name__)
 # exclusive step (fairness valve — keeps PoC from starving under chat churn).
 POC_DEFER_LIMIT = 4
 
+
+def slice_sampling_metadata(sm, rows, device):
+    """Restrict a SamplingMetadata to `rows` (input_batch indices), so the sampler
+    runs on chat rows only. PoC rows have no sampling semantics; keeping them out
+    avoids stale/oversized penalty tensors and the per-row param mismatch."""
+    import dataclasses
+
+    idx = torch.tensor(rows, device=device, dtype=torch.long)
+    keep = set(rows)
+    remap = {old: new for new, old in enumerate(rows)}
+
+    def take_t(t):
+        return None if t is None else t[idx]
+
+    def take_list(lst):
+        return [lst[i] for i in rows] if lst else lst
+
+    def remap_dict(d):
+        return None if d is None else {remap[k]: v for k, v in d.items() if k in keep}
+
+    return dataclasses.replace(
+        sm,
+        temperature=take_t(sm.temperature),
+        top_p=take_t(sm.top_p),
+        top_k=take_t(sm.top_k),
+        generators=remap_dict(sm.generators) or {},
+        logprob_token_ids=remap_dict(sm.logprob_token_ids),
+        prompt_token_ids=take_t(sm.prompt_token_ids),
+        frequency_penalties=take_t(sm.frequency_penalties),
+        presence_penalties=take_t(sm.presence_penalties),
+        repetition_penalties=take_t(sm.repetition_penalties),
+        output_token_ids=take_list(sm.output_token_ids),
+        spec_token_ids=take_list(sm.spec_token_ids),
+        allowed_token_ids_mask=take_t(sm.allowed_token_ids_mask),
+        bad_words_token_ids=remap_dict(sm.bad_words_token_ids),
+        enforced_next_token_ids=take_t(sm.enforced_next_token_ids),
+    )
+
 def decode_only_mixing_gate(
     *,
     mixed_cudagraph: bool,
@@ -493,148 +531,4 @@ def process_poc_outputs_from_hidden(
                 get_decode_manager(runner).free(meta['req_id'])
 
     return poc_outputs
-
-
-def filter_sampling_metadata_for_chat(
-        sampling_metadata,
-        chat_mask: torch.Tensor,
-        chat_indices: list[int],
-):
-    """Filter sampling metadata to only include chat (non-PoC) requests.
-
-    PoC requests don't need sampling - they produce distance vectors, not tokens.
-    Filtering them avoids CUDA asserts from invalid sampling parameters.
-    """
-    from vllm.v1.sample.metadata import SamplingMetadata
-    from vllm.v1.sample.logits_processor.state import LogitsProcessors
-
-    def filter_tensor(t, dim=0):
-        if t is None:
-            return None
-        if t.shape[0] != chat_mask.shape[0]:
-            if t.shape[0] >= max(chat_indices) + 1 if chat_indices else 0:
-                return t[chat_indices] if dim == 0 else t[chat_indices, :]
-            else:
-                logger.warning(
-                    f"filter_tensor: mask shape {chat_mask.shape[0]} != "
-                    f"tensor shape {t.shape}, and cannot index by chat_indices. Skipping filter."
-                )
-                return t
-        return t[chat_mask] if dim == 0 else t[chat_mask, :]
-
-    new_generators = {}
-    for new_idx, old_idx in enumerate(chat_indices):
-        if old_idx in sampling_metadata.generators:
-            new_generators[new_idx] = sampling_metadata.generators[old_idx]
-
-    new_output_token_ids = (
-        [sampling_metadata.output_token_ids[i] for i in chat_indices]
-        if sampling_metadata.output_token_ids
-        else []
-    )
-
-    new_bad_words = {}
-    for new_idx, old_idx in enumerate(chat_indices):
-        if old_idx in sampling_metadata.bad_words_token_ids:
-            new_bad_words[new_idx] = sampling_metadata.bad_words_token_ids[old_idx]
-
-    # TODO: Properly filter logits processors if needed
-    new_logitsprocs = LogitsProcessors()
-
-    # v0.20 SamplingMetadata schema: no batch_logprobs_mode / logprobs_is_processed
-    # (those were v15). logprob_token_ids defaults to None (PoC/chat here don't use
-    # it). spec_token_ids + enforced_next_token_ids carried through.
-    return SamplingMetadata(
-        temperature=filter_tensor(sampling_metadata.temperature),
-        all_greedy=sampling_metadata.all_greedy,
-        all_random=sampling_metadata.all_random,
-        top_p=filter_tensor(sampling_metadata.top_p),
-        top_k=filter_tensor(sampling_metadata.top_k),
-        generators=new_generators,
-        max_num_logprobs=sampling_metadata.max_num_logprobs,
-        no_penalties=sampling_metadata.no_penalties,
-        prompt_token_ids=filter_tensor(sampling_metadata.prompt_token_ids, dim=0),
-        frequency_penalties=filter_tensor(sampling_metadata.frequency_penalties),
-        presence_penalties=filter_tensor(sampling_metadata.presence_penalties),
-        repetition_penalties=filter_tensor(sampling_metadata.repetition_penalties),
-        output_token_ids=new_output_token_ids,
-        allowed_token_ids_mask=filter_tensor(sampling_metadata.allowed_token_ids_mask, dim=0)
-            if sampling_metadata.allowed_token_ids_mask is not None else None,
-        bad_words_token_ids=new_bad_words,
-        logitsprocs=new_logitsprocs,
-        spec_token_ids=(
-            [sampling_metadata.spec_token_ids[i] for i in chat_indices]
-            if sampling_metadata.spec_token_ids else None
-        ),
-        enforced_next_token_ids=(
-            filter_tensor(sampling_metadata.enforced_next_token_ids)
-            if sampling_metadata.enforced_next_token_ids is not None else None
-        ),
-    )
-
-
-def expand_sampler_output_for_poc(
-        sampler_output: "SamplerOutput",
-        chat_mask: torch.Tensor,
-        chat_indices: list[int],
-        num_total_reqs: int,
-) -> "SamplerOutput":
-    """Expand sampler output to include dummy tokens for PoC requests.
-
-    PoC requests were filtered before sampling. This reconstructs the full
-    output with placeholder values for PoC positions.
-    """
-    from vllm.v1.outputs import SamplerOutput, LogprobsTensors
-
-    # PoC positions get token 0 (will be ignored in post-processing)
-    full_sampled = torch.zeros(
-        (num_total_reqs, sampler_output.sampled_token_ids.shape[-1]),
-        dtype=sampler_output.sampled_token_ids.dtype,
-        device=sampler_output.sampled_token_ids.device,
-    )
-    full_sampled[chat_mask] = sampler_output.sampled_token_ids
-
-    full_logprobs = None
-    if sampler_output.logprobs_tensors is not None:
-        lp = sampler_output.logprobs_tensors
-        if lp.top_token_ids is not None:
-            full_top_ids = torch.zeros(
-                (num_total_reqs,) + lp.top_token_ids.shape[1:],
-                dtype=lp.top_token_ids.dtype,
-                device=lp.top_token_ids.device,
-            )
-            full_top_ids[chat_mask] = lp.top_token_ids
-        else:
-            full_top_ids = None
-
-        if lp.top_logprobs is not None:
-            full_top_lp = torch.zeros(
-                (num_total_reqs,) + lp.top_logprobs.shape[1:],
-                dtype=lp.top_logprobs.dtype,
-                device=lp.top_logprobs.device,
-            )
-            full_top_lp[chat_mask] = lp.top_logprobs
-        else:
-            full_top_lp = None
-
-        if lp.sampled_logprobs is not None:
-            full_sampled_lp = torch.zeros(
-                (num_total_reqs,) + lp.sampled_logprobs.shape[1:],
-                dtype=lp.sampled_logprobs.dtype,
-                device=lp.sampled_logprobs.device,
-            )
-            full_sampled_lp[chat_mask] = lp.sampled_logprobs
-        else:
-            full_sampled_lp = None
-
-        full_logprobs = LogprobsTensors(
-            top_token_ids=full_top_ids,
-            top_logprobs=full_top_lp,
-            sampled_logprobs=full_sampled_lp,
-        )
-
-    return SamplerOutput(
-        sampled_token_ids=full_sampled,
-        logprobs_tensors=full_logprobs,
-    )
 

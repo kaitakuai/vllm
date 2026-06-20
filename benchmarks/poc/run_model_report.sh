@@ -81,11 +81,15 @@ done
 # 3. GSM8K co-existence (on vs off) — same N both runs so accuracy is comparable.
 # Co-existence holds iff PoC-load accuracy ≈ baseline (within sampling margin).
 GSM_LIMIT="${GSM_LIMIT:-100}"
+GSM_BS="${GSM_BS:-32}"   # production inference batch size
 if [ "$GSM" = 1 ]; then
-  $PY "$HERE/quality_gsm8k.py" --model_name "$HONEST" --profile cudagraph --limit "$GSM_LIMIT" \
-      "${URLA[@]}" --output_path "$OUT/gsm_on"  2>/dev/null && echo "[gsm8k] on"  || echo "  gsm8k on FAILED"
-  $PY "$HERE/quality_gsm8k.py" --model_name "$HONEST" --profile cudagraph --limit "$GSM_LIMIT" --disable_poc \
-      "${URLA[@]}" --output_path "$OUT/gsm_off" 2>/dev/null && echo "[gsm8k] off" || echo "  gsm8k off FAILED"
+  # 4 runs: pure chat vs +PoC, each on cudagraph and eager (co-existence must hold on both).
+  for prof in cudagraph eager; do
+    $PY "$HERE/quality_gsm8k.py" --model_name "$HONEST" --batch_size "$GSM_BS" --profile "$prof" --limit "$GSM_LIMIT" \
+        "${URLA[@]}" --output_path "$OUT/gsm_${prof}_on"  --save "$OUT/gsm_${prof}_on.json"  && echo "[gsm8k] $prof on"  || echo "  gsm8k $prof on FAILED"
+    $PY "$HERE/quality_gsm8k.py" --model_name "$HONEST" --batch_size "$GSM_BS" --profile "$prof" --limit "$GSM_LIMIT" --disable_poc \
+        "${URLA[@]}" --output_path "$OUT/gsm_${prof}_off" --save "$OUT/gsm_${prof}_off.json" && echo "[gsm8k] $prof off" || echo "  gsm8k $prof off FAILED"
+  done
 fi
 
 # 4. RENDER

@@ -34,10 +34,15 @@ def _load(paths):
     for f in files:
         try:
             d = json.load(open(f))
-            d["_file"] = os.path.relpath(f)
-            recs.append(d)
         except Exception as e:
             print(f"skip {f}: {e}")
+            continue
+        # Only role-tagged result records (dict with meta/results); silently ignore
+        # raw artifact dumps like poc_artifacts.json (a list).
+        if not isinstance(d, dict) or "results" not in d:
+            continue
+        d["_file"] = os.path.relpath(f)
+        recs.append(d)
     return recs
 
 
@@ -57,6 +62,22 @@ def _gpu(meta, n=None):
     """GPU label (drop the 'NVIDIA' prefix + driver suffix); full name, no truncation."""
     g = str(_g(meta, "gpu", default="?")).replace("NVIDIA ", "").split(",")[0].strip()
     return g if n is None else _short(g, n)
+
+
+def _backend(s):
+    """Normalize an attention-backend or profile string to FA / FI."""
+    s = str(s).lower()
+    if "flashinfer" in s:
+        return "FI"
+    if "flash_attn" in s or "flashattn" in s or "flash attention" in s:
+        return "FA"
+    return "?"
+
+
+def _eng(s):
+    """Short graph-mode label."""
+    s = str(s).lower()
+    return "graph" if "graph" in s or "cuda" in s else ("eager" if "eager" in s else s)
 
 
 def _bar(frac, kind="perf", thresh=None):
@@ -88,12 +109,29 @@ def _is_perf(r):
     return "total_nonces" in r.get("results", {})
 
 
+def _is_eager(m):
+    s = str(_g(m, "engine", "cudagraph_mode") or "").upper()
+    return "EAGER" in s or "NONE" in s or s == ""
+
+
 def perf_section(recs):
     rows = [(r["meta"], r.get("results", {})) for r in recs if _is_perf(r)]
     if not rows:
         return "<p class=na>no perf runs</p>"
     mx = max(res.get("nonces_per_s", 0) for _, res in rows) or 1
-    out = ["<table><tr><th>hardware</th><th>engine</th><th>attention</th><th>max_tok</th>"
+    # Highlight: best cudagraph vs best eager (the cudagraph speedup).
+    cg = [res.get("nonces_per_s", 0) for m, res in rows if not _is_eager(m)]
+    eg = [res.get("nonces_per_s", 0) for m, res in rows if _is_eager(m)]
+    highlight = ""
+    if cg and eg and max(eg) > 0:
+        bcg, beg = max(cg), max(eg)
+        d = 100.0 * (bcg - beg) / beg
+        highlight = (
+            f"<p class=highlight>Best <b>cudagraph</b> {bcg*60:.0f} nonces/min "
+            f"vs best <b>eager</b> {beg*60:.0f} nonces/min &mdash; "
+            f"cudagraph is <b>{d:+.1f}%</b></p>")
+    out = [highlight,
+           "<table><tr><th>hardware</th><th>engine</th><th>attention</th><th>max_tok</th>"
            "<th>nonces/min</th><th>steps/s</th><th></th></tr>"]
     for m, res in sorted(rows, key=lambda x: -x[1].get("nonces_per_s", 0)):
         npm = res.get("nonces_per_s", 0) * 60
@@ -114,32 +152,115 @@ def separation_section(recs):
             if r.get("meta", {}).get("role") == "validate" and "rate" in r.get("results", {})]
     if not vals:
         return "<p class=na>no separation runs</p>", None
+    # Decode-PoC trajectories are attention-backend-specific: FlashAttention vs
+    # FlashInfer kernels are not bit-identical, and a single early sphere_k flip
+    # re-seeds the chain, so over many decode steps the divergence compounds past the
+    # fraud threshold. cudagraph vs eager replays the SAME kernel → invariant. So PASS
+    # is judged on backend-matched honest (the production stance: pin the backend) +
+    # fraud caught everywhere; cross-backend honest rows are shown as an informational
+    # caveat, not a failure.  See KB: decode-poc-trajectories-are-attention-backend-specific.
     ok = True
-    out = ["<table><tr><th>hardware (val ⇐ prover)</th><th>validator ⇐ prover</th>"
-           "<th>kind</th><th>rate</th><th>fraud?</th><th></th></tr>"]
+    any_cross = False
+    out = ["<table><tr><th>hardware (val ⇐ prover)</th><th>config (val ⇐ prover)</th>"
+           "<th>model (val ⇐ prover)</th><th>kind</th><th>rate</th><th>verdict</th><th></th></tr>"]
     for m, res in sorted(vals, key=lambda x: (x[1].get("rate", 0))):
         v, p = res.get("validator_model", "?"), res.get("prover_model", "?")
         honest = (v == p)
         rate = res.get("rate", 0.0)
         fraud = res.get("fraud_detected")
-        good = (honest and not fraud) or ((not honest) and fraud)
-        ok = ok and good
-        kind = "honest" if honest else "fraud"
-        flag = "" if good else " ⚠"
-        # validator HW from this record's meta; prover HW from the ref (results.prover_gpu)
+        thresh = res.get("p_mismatch") or m.get("p_mismatch") or 0.1
+        vbe, pbe = _backend(m.get("attention_backend")), _backend(m.get("prover_profile"))
+        same_be = (vbe == pbe and vbe != "?")
+        veng, peng = _eng(m.get("engine")), _eng(m.get("prover_engine"))
+        if honest and same_be:
+            kind, good, counts = "honest", (not fraud), True
+        elif honest:               # cross-backend honest: expected divergence, informational
+            kind, good, counts, any_cross = "honest·x-backend", (not fraud), False, True
+        else:
+            kind, good, counts = "fraud", bool(fraud), True
+        if counts:
+            ok = ok and good
+        verdict = ("ok" if good else "⚠ MISS") if counts else ("ok" if good else "pin-backend")
+        rowcls = "honest" if honest else "fraud"
+        if not counts:
+            rowcls = "cross"
         vhw = _gpu(m)
         phw = str(res.get("prover_gpu")).replace("NVIDIA ", "").split(",")[0].strip() \
             if res.get("prover_gpu") else vhw
         out.append(
-            f"<tr class={'honest' if honest else 'fraud'}>"
+            f"<tr class={rowcls}>"
             f"<td>{html.escape(vhw)} ⇐ {html.escape(phw)}</td>"
+            f"<td>{veng}/{vbe} ⇐ {peng}/{pbe}</td>"
             f"<td>{html.escape(_short(v,20))} ⇐ {html.escape(_short(p,20))}</td>"
             f"<td>{kind}</td><td class=num>{rate*100:.2f}%</td>"
-            f"<td class=num>{fraud}{flag}</td>"
-            f"<td class=bar>{_bar(rate, 'honest' if honest else 'fraud', thresh=res.get('p_mismatch', m.get('p_mismatch', 0.1)))}</td></tr>")
+            f"<td class=num>{verdict}</td>"
+            f"<td class=bar>{_bar(rate, 'honest' if honest else 'fraud', thresh=thresh)}</td></tr>")
     out.append("</table>")
+    if any_cross:
+        out.append(
+            "<p class=note><b>Backend pinning:</b> rows marked "
+            "<code>honest·x-backend</code> validate an honest run across <em>different</em> "
+            "attention backends (FlashAttention ⇄ FlashInfer). Their elevated rate is "
+            "<em>expected</em> — the kernels are not bit-identical and the per-step "
+            "<code>sphere_k</code> chain compounds tiny FP deltas over the trajectory. "
+            "They are <em>not</em> counted as failures: production pins the attention "
+            "backend (prover &amp; validator match), where honest ≈ 0. cudagraph vs eager "
+            "is invariant (same kernel). Fraud is caught in <em>every</em> config.</p>")
     verdict = "PASS" if ok else "FAIL"
     return "\n".join(out), verdict
+
+
+def calibration_section(recs):
+    """Threshold-setting tool: derive the feasible per-model p_mismatch window from the
+    MEASURED honest/fraud rates. p_mismatch is NOT baked in - prod loads it per-model from
+    chain PoCStatTestParams; this picks the value for that config: honest_max < p < fraud_min."""
+    import math
+    from collections import defaultdict
+    vals = [(r["meta"], r["results"]) for r in recs
+            if r.get("meta", {}).get("role") == "validate" and "rate" in r.get("results", {})]
+    if not vals:
+        return "<p class=na>no validation runs</p>"
+    g = defaultdict(lambda: {"hs": [], "hx": [], "fr": []})
+    for m, res in vals:
+        v, p = res.get("validator_model", "?"), res.get("prover_model", "?")
+        rate = res.get("rate", 0.0)
+        vbe, pbe = _backend(m.get("attention_backend")), _backend(m.get("prover_profile"))
+        same_be = (vbe == pbe and vbe != "?")
+        bucket = "hs" if (v == p and same_be) else ("hx" if v == p else "fr")
+        g[v][bucket].append(rate)
+
+    def pct(x):
+        return "&mdash;" if x is None else f"{x*100:.2f}%"
+
+    out = ["<table><tr><th>model</th><th>honest same-be (max)</th><th>honest x-be (max)</th>"
+           "<th>fraud (min)</th><th>feasible p_mismatch</th><th>recommended</th><th>separable</th></tr>"]
+    for model, b in sorted(g.items()):
+        hs = max(b["hs"]) if b["hs"] else None
+        hx = max(b["hx"]) if b["hx"] else None
+        fr = min(b["fr"]) if b["fr"] else None
+        floor = max([x for x in (hs, hx) if x is not None], default=None)  # heterogeneous floor
+        if fr is not None and floor is not None and floor < fr:
+            rec = math.sqrt(floor * fr) if floor > 0 else fr / 3
+            window, rec_s, sep = f"({pct(floor)}, {pct(fr)})", f"{rec*100:.1f}%", "YES"
+        elif fr is not None and hs is not None and hs < fr:  # only separable if backend pinned
+            rec = math.sqrt(hs * fr) if hs > 0 else fr / 3
+            window, rec_s, sep = f"pinned: ({pct(hs)}, {pct(fr)})", f"{rec*100:.1f}% (pin backend)", "pinned-only"
+        else:
+            window, rec_s, sep = "&mdash;", "&mdash;", "NO gap &#9888;"
+        out.append(
+            f"<tr><td>{html.escape(_short(model, 28))}</td>"
+            f"<td class=num>{pct(hs)}</td><td class=num>{pct(hx)}</td><td class=num>{pct(fr)}</td>"
+            f"<td>{window}</td><td class=num>{rec_s}</td><td>{sep}</td></tr>")
+    out.append("</table>")
+    out.append(
+        "<p class=gloss><b>p_mismatch is not baked in</b> &mdash; production loads it per-model "
+        "from chain <code>PoCStatTestParams</code> (decentralized-api <code>validator.go</code> "
+        "&rarr; <code>StatTestParamsFromChain</code> &rarr; vLLM <code>stat_test</code>). This "
+        "table sets that value from measured rates: any <code>p_mismatch</code> in "
+        "(honest_max, fraud_min) separates. Recommended = geometric mean of the bounds. "
+        "Backend-pinned uses honest same-be (tiny) &rarr; widest margin; heterogeneous uses "
+        "honest x-be. <code>NO gap</code> = honest &ge; fraud, not separable at this config.</p>")
+    return "\n".join(out)
 
 
 def gsm8k_section(recs):
@@ -148,8 +269,9 @@ def gsm8k_section(recs):
     if not rows:
         return "<p class=na>no gsm8k runs</p>"
     out = ["<table><tr><th>hardware</th><th>engine</th><th>PoC load</th><th>strict</th><th>flex</th></tr>"]
-    for m, res in sorted(rows, key=lambda x: x[0].get("poc_max_tokens", 0)):
-        load = "off (baseline)" if not m.get("poc_max_tokens") else f"on (mt={m.get('poc_max_tokens')})"
+    for m, res in sorted(rows, key=lambda x: (not _is_eager(x[0]), x[0].get("poc_max_tokens", 0))):
+        mt = m.get("poc_max_tokens")
+        load = "pure chat (no PoC)" if not mt else f"+ 32 PoC ({mt} decode steps)"
         s, f = res.get("strict_match"), res.get("flexible_extract")
         out.append(
             f"<tr><td>{html.escape(_gpu(m))}</td>"
@@ -192,9 +314,16 @@ tbody tr:hover{background:#f1f5f9}
 .chip{display:inline-block;padding:.18rem .7rem;border-radius:999px;font-size:.78rem;font-weight:700;letter-spacing:.02em}
 .pass{background:#dcfce7;color:#166534} .fail{background:#fee2e2;color:#991b1b}
 .cov{font-size:.72rem;font-weight:500;color:var(--mut);text-transform:none;letter-spacing:0}
-tr.honest td:nth-child(3){color:var(--green);font-weight:600}
-tr.fraud td:nth-child(3){color:var(--red);font-weight:600}
+tr.honest td:nth-child(4){color:var(--green);font-weight:600}
+tr.fraud td:nth-child(4){color:var(--red);font-weight:600}
+tr.cross td:nth-child(4){color:var(--amber);font-weight:600}
+tr.cross{background:#fffbeb}
+.note{font-size:.78rem;color:var(--mut);line-height:1.55;background:#fffbeb;
+  border-left:3px solid var(--amber);padding:.55rem .8rem;border-radius:6px;margin:.6rem 0}
+.note b{color:#92400e}
 .na{color:#94a3b8;font-style:italic;font-size:.85rem}
+.highlight{background:#ecfdf5;border-left:3px solid #10b981;padding:.55rem .8rem;border-radius:6px;margin:.6rem 0;font-size:.95rem}
+.highlight b{color:#065f46}
 .gloss{color:var(--mut);font-size:.8rem;line-height:1.6;margin-top:.5rem}
 ul.gloss{margin:.3rem 0 0;padding-left:1.1rem} ul.gloss li{margin:.35rem 0}
 code{background:#f1f5f9;padding:.05rem .35rem;border-radius:4px;font-size:.9em}
@@ -247,6 +376,8 @@ def render(recs):
         parts.append(f"<h2>Performance <span class=cov>{n_perf} config(s)</span></h2>" + perf_section(rs))
         parts.append(f"<h2>Separation — honest vs fraud "
                      f"<span class=cov>{len(sep)} pair(s): {n_h} honest, {n_f} fraud</span></h2>" + sep_html)
+        parts.append("<h2>p_mismatch calibration <span class=cov>feasible threshold window</span></h2>"
+                     + calibration_section(rs))
         parts.append(f"<h2>Co-existence — GSM8K <span class=cov>{n_gsm} run(s)</span></h2>" + gsm8k_section(rs))
         parts.append("</div>")
     parts.append(
