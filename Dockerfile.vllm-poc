@@ -23,6 +23,10 @@
 ARG RESIDUAL_IMAGE=ghcr.io/kaitakuai/vllm-sampler-residual:0.23.0-gonka.sampler1
 FROM ${RESIDUAL_IMAGE}
 
+# Re-declare inside the build stage so RESIDUAL_IMAGE is in scope for the LABEL
+# below — an ARG declared before FROM is only visible to the FROM line itself.
+ARG RESIDUAL_IMAGE
+
 # GONKA_POC_REF: a gonka-poc git ref (SHA strongly preferred; a tag/branch
 # also works). No default — the build MUST pin a ref so the image is
 # reproducible. The workflow passes a full SHA.
@@ -64,8 +68,12 @@ RUN pip install --no-cache-dir \
 LABEL gonka.kaitaku.residual_digest="${RESIDUAL_IMAGE}" \
       gonka.kaitaku.gonka_poc_ref="${GONKA_POC_REF}"
 
-# Smoke check at build time: the console script must be importable/runnable.
-# `gonka-vllm-serve` is the [project.scripts] entry point
-# (gonka_poc.entrypoint.api_router:main). --help exercises the import graph
-# (plugin registration + vLLM arg parser) without needing a GPU.
-RUN gonka-vllm-serve --help > /dev/null
+# Smoke check at build time: exercise the plugin import graph + entry points
+# WITHOUT constructing a VllmConfig. We deliberately do NOT run
+# `gonka-vllm-serve --help` here: in vLLM 0.23 building the CLI parser
+# materializes VllmConfig defaults whose DeviceConfig probes for a GPU and
+# raises "Failed to infer device type" on a CPU-only CI runner. A pure import
+# check still catches broken imports / missing deps / a missing console script;
+# the full serve path is covered by the live GPU acceptance tests.
+RUN command -v gonka-vllm-serve > /dev/null \
+ && python3 -c "import gonka_poc.entrypoint.api_router as r; assert callable(r.main); from gonka_poc.worker import PoCWorkerExtension; import gonka_poc.plugin as p; assert callable(p.register); print('gonka-poc import + entrypoints OK')"
