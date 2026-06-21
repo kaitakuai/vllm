@@ -1,0 +1,181 @@
+name: build-vllm-poc
+
+# Stage 2 (S2): builds and publishes the kaitakuai vllm-poc image.
+#
+#   S1 residual base (ghcr.io/kaitakuai/vllm-sampler-residual:0.23.0-gonka.sampler1)
+#     + gonka-poc plugin (pip install from git, pinned SHA)
+#     = ghcr.io/kaitakuai/vllm-poc
+#
+# This is an *overlay* build (Dockerfile.vllm-poc): FROM the residual + two
+# `pip install` layers. It does NOT recompile CUDA / .so artifacts, so each
+# rebuild is fast regardless of total image size.
+#
+# Modeled on build-sampler-residual.yml (same branch). Adds the supply-chain
+# layer that the residual workflow explicitly deferred: cosign keyless
+# signing, SLSA provenance attestation, and an SBOM.
+#
+# Tag scheme:
+#   0.23.0                  mutable; points at the branch HEAD
+#   0.23.0-<gonka_poc_sha9> immutable; pins the exact gonka-poc plugin commit
+#
+# Build-args:
+#   RESIDUAL_IMAGE  pinned S1 residual (digest preferred over mutable tag)
+#   GONKA_POC_REF   gonka-poc git ref (full SHA preferred)
+
+on:
+  push:
+    branches:
+      - 'residual/vllm-poc'
+    paths:
+      - 'Dockerfile.vllm-poc'
+      - '.github/workflows/build-vllm-poc.yml'
+  workflow_dispatch:
+    inputs:
+      residual_image:
+        description: 'S1 residual base. Default: ghcr.io/kaitakuai/vllm-sampler-residual:0.23.0-gonka.sampler1. Pin to a digest for reproducibility.'
+        required: false
+      gonka_poc_ref:
+        description: 'gonka-poc git ref (full SHA preferred). Default: main.'
+        required: false
+      image_tag:
+        description: 'Mutable image tag. Default: 0.23.0.'
+        required: false
+
+permissions:
+  packages: write       # GHCR push
+  contents: read
+  id-token: write       # cosign keyless (OIDC) + SLSA provenance
+  attestations: write   # build provenance attestation
+
+concurrency:
+  group: build-vllm-poc-${{ github.ref }}
+  cancel-in-progress: false   # don't interrupt mid-publish
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+
+      - name: Derive tags + build-args
+        id: tag
+        env:
+          INPUT_RESIDUAL_IMAGE: ${{ inputs.residual_image }}
+          INPUT_GONKA_POC_REF: ${{ inputs.gonka_poc_ref }}
+          INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
+        run: |
+          set -euo pipefail
+          RESIDUAL_IMAGE="${INPUT_RESIDUAL_IMAGE:-ghcr.io/kaitakuai/vllm-sampler-residual:0.23.0-gonka.sampler1}"
+          GONKA_POC_REF="${INPUT_GONKA_POC_REF:-main}"
+          IMAGE_TAG="${INPUT_IMAGE_TAG:-0.23.0}"
+
+          # Resolve GONKA_POC_REF to a full SHA so the immutable tag pins the
+          # exact plugin commit even when a branch/tag was supplied.
+          GONKA_POC_SHA="$(git ls-remote https://github.com/kaitakuai/gonka-poc "${GONKA_POC_REF}" | awk '{print $1}' | head -n1)"
+          if [ -z "${GONKA_POC_SHA}" ]; then
+            # Ref was already a SHA (ls-remote returns nothing for a raw SHA).
+            GONKA_POC_SHA="${GONKA_POC_REF}"
+          fi
+          GONKA_POC_SHA9="${GONKA_POC_SHA:0:9}"
+
+          IMAGE_REPO="ghcr.io/${GITHUB_REPOSITORY_OWNER,,}/vllm-poc"
+          MUTABLE_TAG="${IMAGE_REPO}:${IMAGE_TAG}"
+          IMMUTABLE_TAG="${IMAGE_REPO}:${IMAGE_TAG}-${GONKA_POC_SHA9}"
+          {
+            echo "residual_image=$RESIDUAL_IMAGE"
+            echo "gonka_poc_ref=$GONKA_POC_REF"
+            echo "gonka_poc_sha=$GONKA_POC_SHA"
+            echo "gonka_poc_sha9=$GONKA_POC_SHA9"
+            echo "image_repo=$IMAGE_REPO"
+            echo "image_tag=$IMAGE_TAG"
+            echo "mutable_tag=$MUTABLE_TAG"
+            echo "immutable_tag=$IMMUTABLE_TAG"
+          } >> "$GITHUB_OUTPUT"
+          echo "Resolved: RESIDUAL_IMAGE=$RESIDUAL_IMAGE, GONKA_POC_REF=$GONKA_POC_REF ($GONKA_POC_SHA9) -> $MUTABLE_TAG (also $IMMUTABLE_TAG)"
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver-opts: |
+            image=moby/buildkit:latest
+
+      - name: Build and push vllm-poc overlay
+        id: build
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile.vllm-poc
+          push: true
+          provenance: true       # SLSA build provenance baked into the index
+          sbom: true             # SPDX SBOM attestation attached to the image
+          tags: |
+            ${{ steps.tag.outputs.mutable_tag }}
+            ${{ steps.tag.outputs.immutable_tag }}
+          cache-from: type=registry,ref=${{ steps.tag.outputs.mutable_tag }}-buildcache
+          cache-to: type=registry,ref=${{ steps.tag.outputs.mutable_tag }}-buildcache,mode=max
+          build-args: |
+            RESIDUAL_IMAGE=${{ steps.tag.outputs.residual_image }}
+            GONKA_POC_REF=${{ steps.tag.outputs.gonka_poc_sha }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.description=kaitakuai vllm-poc (S1 residual ${{ steps.tag.outputs.residual_image }} + gonka-poc ${{ steps.tag.outputs.gonka_poc_sha9 }})
+            gonka.kaitaku.residual_digest=${{ steps.tag.outputs.residual_image }}
+            gonka.kaitaku.gonka_poc_ref=${{ steps.tag.outputs.gonka_poc_sha }}
+
+      - name: Install cosign
+        uses: sigstore/cosign-installer@v3
+
+      - name: Sign image (keyless)
+        env:
+          COSIGN_YES: 'true'
+          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE_REPO: ${{ steps.tag.outputs.image_repo }}
+        run: |
+          set -euo pipefail
+          # Sign the immutable digest — both the mutable and immutable tags
+          # resolve to it. Keyless: identity is the GitHub OIDC token, recorded
+          # in the Rekor transparency log.
+          cosign sign --recursive "${IMAGE_REPO}@${DIGEST}"
+
+      - name: Attest SLSA build provenance
+        uses: actions/attest-build-provenance@v2
+        with:
+          subject-name: ${{ steps.tag.outputs.image_repo }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
+
+      - name: Summary
+        run: |
+          {
+            echo "### vllm-poc build summary"
+            echo ""
+            echo "- **RESIDUAL_IMAGE**: \`${{ steps.tag.outputs.residual_image }}\`"
+            echo "- **GONKA_POC_REF**: \`${{ steps.tag.outputs.gonka_poc_ref }}\` -> \`${{ steps.tag.outputs.gonka_poc_sha }}\`"
+            echo "- **Mutable tag**: \`${{ steps.tag.outputs.mutable_tag }}\`"
+            echo "- **Immutable tag**: \`${{ steps.tag.outputs.immutable_tag }}\`"
+            echo "- **Digest**: \`${{ steps.build.outputs.digest }}\`"
+            echo "- **Signed**: cosign keyless (Rekor)"
+            echo "- **Provenance**: SLSA build provenance + SPDX SBOM attestation"
+            echo "- **Commit**: [\`${{ github.sha }}\`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})"
+            echo ""
+            echo "> Feed \`${{ steps.tag.outputs.image_repo }}@${{ steps.build.outputs.digest }}\` into foundry \`stage3.lock.cue\` \`stage2.image\`."
+          } >> "$GITHUB_STEP_SUMMARY"

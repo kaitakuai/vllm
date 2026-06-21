@@ -1,0 +1,67 @@
+# syntax=docker/dockerfile:1
+#
+# Stage 2 (S2): vllm-poc image.
+#
+#   S1 residual base (sampler-stack overlay on vLLM 0.23.0, cu129)
+#     + the out-of-tree gonka-poc plugin (pip install from git)
+#     = vllm-poc
+#
+# The gonka-poc plugin ships as a stock-vLLM plugin (vllm.general_plugins
+# entry point) plus the `gonka-vllm-serve` console script. It is installed
+# with --no-deps on purpose: the S1 residual base already carries the patched
+# vllm wheel (0.23.0+gonka.sampler1) and all of gonka-poc's runtime deps
+# (see the dep audit below). Letting pip resolve gonka-poc's `vllm>=0.23.0`
+# dependency would pull a VANILLA vllm wheel over the residual patches and
+# silently revert the sampler stack — exactly what --no-deps prevents.
+#
+# Tag scheme (publishing workflow, build-vllm-poc.yml):
+#   ghcr.io/kaitakuai/vllm-poc:0.23.0                 mutable; branch HEAD
+#   ghcr.io/kaitakuai/vllm-poc:0.23.0-<gonka_poc_sha9> immutable; pinned plugin
+
+# RESIDUAL_IMAGE: the S1 residual base. Default is the mutable tag; the
+# publishing workflow overrides it with a pinned digest for reproducibility.
+ARG RESIDUAL_IMAGE=ghcr.io/kaitakuai/vllm-sampler-residual:0.23.0-gonka.sampler1
+FROM ${RESIDUAL_IMAGE}
+
+# GONKA_POC_REF: a gonka-poc git ref (SHA strongly preferred; a tag/branch
+# also works). No default — the build MUST pin a ref so the image is
+# reproducible. The workflow passes a full SHA.
+ARG GONKA_POC_REF
+
+# Mandatory: collective_rpc msgpack channel between the API process and the
+# worker (PoC artifacts ride this channel). Documented in the gonka-poc README
+# "Required runtime configuration" table. The S1 residual base already sets
+# this, but we re-assert it here so the S2 image is self-documenting and
+# robust to a future base that drops it.
+ENV VLLM_ALLOW_INSECURE_SERIALIZATION=1
+
+# Install the gonka-poc plugin only — no transitive deps (see header).
+RUN pip install --no-cache-dir --no-deps \
+    "git+https://github.com/kaitakuai/gonka-poc@${GONKA_POC_REF}"
+
+# gonka-poc runtime deps that --no-deps skipped. On the CURRENT S1 residual
+# base every one of these is ALREADY satisfied:
+#   - vllm / torch / numpy : residual base wheel
+#   - scipy>=1.10          : residual Dockerfile.quick (`pip install scipy`)
+#   - fastapi<0.137        : base vllm common.txt (fastapi[standard] >=0.115,<0.137)
+#   - aiohttp>=3.9         : base vllm common.txt (aiohttp >= 3.13.3)
+#   - pydantic>=2          : base vllm common.txt (pydantic >= 2.12.0)
+#   - starlette            : transitively via fastapi[standard] in base
+# So this layer installs nothing new today; it is a fail-loud safety net that
+# pins the floor versions in case a future residual base ever drops one. It is
+# intentionally NOT --no-deps so a missing dep would actually be resolved.
+RUN pip install --no-cache-dir \
+    "aiohttp>=3.9" \
+    "fastapi<0.137" \
+    "pydantic>=2" \
+    "starlette" \
+    "scipy>=1.10"
+
+LABEL gonka.kaitaku.residual_digest="${RESIDUAL_IMAGE}" \
+      gonka.kaitaku.gonka_poc_ref="${GONKA_POC_REF}"
+
+# Smoke check at build time: the console script must be importable/runnable.
+# `gonka-vllm-serve` is the [project.scripts] entry point
+# (gonka_poc.entrypoint.api_router:main). --help exercises the import graph
+# (plugin registration + vLLM arg parser) without needing a GPU.
+RUN gonka-vllm-serve --help > /dev/null
