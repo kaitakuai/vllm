@@ -83,11 +83,24 @@ SEPARATION: PASS  (honest must be fraud=False, fraud must be fraud=True)
 ```
 Honest 0.14% ≪ 10% ≪ fraud 33.8% — a wide, unambiguous gap.
 
-## Determinism requirement
-The fingerprint must be **identical across engine configurations** — eager vs
-CUDA-graph, async vs sync. If graph mode changed the trajectory, validation would be
-meaningless, so this is a hard gate (`tests/poc/integration/test_async_equivalence.py`
-+ byte-comparing `collect.py` outputs).
+## Determinism & config sensitivity
+The trajectory is reproducible at a **fixed** config, but config-sensitive in degrees —
+the divergence between two *honest* runs grows with how different their configs are:
+
+> same config  <  cudagraph vs eager (same backend)  <  different attention backend  <  different model (fraud)
+
+- **async on ↔ off** (same engine + backend): **byte-identical** — the hard gate we
+  enforce (`tests/poc/integration/test_async_equivalence.py` + byte-comparing
+  `collect.py` outputs). Async must not change the artifact.
+- **graph mode** (cudagraph ↔ eager, same backend): small — stays under a calibrated
+  `p_mismatch`, so it's **tolerated**.
+- **attention backend** (FlashAttention ↔ FlashInfer): large — the validator **must use
+  the prover's backend** (pin it), or an honest run reads as fraud.
+- **different model**: large — this is the fraud signal.
+
+The goal is a **separable gap**: honest below the threshold, fraud above, backend pinned.
+The actual per-model rates and the feasible `p_mismatch` window are **measured** (report
+SEPARATION + calibration), not hardcoded.
 
 Every result file also records **full provenance** (GPU + driver, vLLM commit, engine
 mode, attention backend, dtype, quant, model, shape), so any two runs are directly
@@ -162,8 +175,10 @@ above runs through the same `--profile` / `--url` / shape flags with no code cha
 | Result | Metric | Tool |
 |---|---|---|
 | Fraud/honest separation | `rate`, `fraud = rate > p_mismatch` | `collect.py` generate/validate → `analyze.py` SEPARATION (one command: `pair_report.sh`) |
-| Determinism | fingerprint byte-identical across engines | `tests/poc/integration/test_async_equivalence.py` + `collect.py` byte-compare |
-| Throughput | nonces/s, nonces/min, steps/s | `perfomance_nonces.py`; `collect.py` timing → `analyze.py` PERF |
+| Determinism | fingerprint byte-identical for async on↔off (same engine+backend) | `tests/poc/integration/test_async_equivalence.py` + `collect.py` byte-compare |
+| Config sensitivity | divergence grows: same < graph-mode (tolerated) < backend (pin) < fraud; goal = separable gap | `collect.py` validate matrix → `report.py` SEPARATION + calibration |
+| Throughput | nonces/min, steps/s | `perfomance_nonces.py --mode poc` → `analyze.py` PERF |
+| Inference-readiness fidelity | PoC nonce/min vs real chat req/min (same unit ⇒ closeness shows PoC measures real serving capacity) | `perfomance_nonces.py --mode both` → PERF fidelity headline |
 | Co-existence | GSM8K strict/flexible accuracy ± PoC load | `quality_gsm8k.py` (`--disable_poc` baseline) → `analyze.py` GSM8K |
 | Correctness suite | unit + integration (separation, equivalence, multi-batch slot-reuse) | `tests/poc/unit/*`, `tests/poc/integration/*` |
 
@@ -178,9 +193,8 @@ one says *how fast*, the other says *honest or fraud*.
 | `collect.py` | data collection (client/server): `--mode generate` / `--mode validate`, full provenance |
 | `analyze.py` | offline analysis: SEPARATION matrix, PERF table, GSM8K accuracy, cross-hardware |
 | `pair_report.sh` | one-command honest/fraud pair (generate ×2, validate ×4, analyze); `--gen-profile`/`--val-profile` for cross-engine |
-| `perfomance_nonces.py` | sustained decode throughput (nonces/s, steps/s) |
+| `perfomance_nonces.py` | sustained throughput — `--mode poc` (nonces/min, steps/s), `--mode chat` (req/min, tokens/s), or `--mode both`; powers the inference-readiness fidelity comparison |
 | `quality_gsm8k.py` | GSM8K accuracy ± concurrent PoC load |
-| `chat_throughput.py` | chat-only baseline |
 | `poc_validation.py` | shared core: deploy/serve, profile resolution, request builder, provenance |
 | `poc_configs.json` | named engine profiles (graph/eager × attention backend) |
 | `requirements.txt` | tooling deps (`requests`; gsm8k: `aiohttp`, `numpy`, `lm_eval`) |

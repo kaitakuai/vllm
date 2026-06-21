@@ -44,10 +44,12 @@ mkdir -p "$OUT"
 URLA=(); [ -n "$URL" ] && URLA=(--url "$URL")
 echo "=== session: $OUT  (model=$HONEST fraud=${FRAUD:-none} scope=$SCOPE nonces=$NONCES mt=$MT) ==="
 
-# 1. PERF — one per config
+# 1. PERF — PoC nonces AND pure-chat inference per config (one server lifetime each).
+# Both saved (perf_<c>.poc.json / perf_<c>.chat.json); the report compares nonce/min
+# vs req/min to show decode-PoC tracks real-inference capacity.
 for c in "${CONFIGS[@]}"; do
-  echo "[perf] $c"
-  $PY "$HERE/perfomance_nonces.py" --model "$HONEST" --profile "$c" \
+  echo "[perf both] $c"
+  $PY "$HERE/perfomance_nonces.py" --mode both --model "$HONEST" --profile "$c" \
       --seq-len 64 --max-tokens "$MT" --duration 20 "${URLA[@]}" \
       --save "$OUT/perf_${c}.json" || echo "  perf $c FAILED"
 done

@@ -74,6 +74,28 @@ def vllm_config(srv) -> Dict[str, Any]:
     return cfg
 
 
+def remote_config(url: str, want_backend: Optional[str], eager: bool) -> Dict[str, Any]:
+    """Provenance for a server we connect to but don't boot (connect/remote mode): no
+    log to parse, so take the vLLM version + served model over HTTP and label the
+    engine/attention from what was REQUESTED (a remote can silently fall back, so
+    these are 'requested', verified only on local boots)."""
+    cfg: Dict[str, Any] = {"server_url": url}
+    try:
+        cfg["vllm_version"] = requests.get(f"{url}/version", timeout=5).json().get("version")
+    except Exception:
+        pass
+    try:
+        data = requests.get(f"{url}/v1/models", timeout=5).json().get("data") or []
+        if data:
+            cfg["model"] = data[0]["id"]
+    except Exception:
+        pass
+    if want_backend:
+        cfg["attention_backend"] = want_backend
+    cfg["cudagraph_mode"] = "NONE" if eager else "FULL_AND_PIECEWISE"
+    return cfg
+
+
 # PoC endpoint prefix per target: vLLM engine directly vs the ML-node proxy.
 POC_PREFIX = {"vllm": "/api/v1/pow", "mlnode": "/api/v1/inference/pow"}
 
@@ -152,12 +174,25 @@ def deploy(model: str, *, url: Optional[str] = None, eager: bool = False,
       - url None   : boot vLLM LOCALLY (serve()) for dev.
     Works for ANY model; nothing IP-hardcoded."""
     if url:
-        args = list(DEFAULT_POC_SERVE_ARGS) + list(extra_args or []) + (["--enforce-eager"] if eager else [])
-        inference_up(url, model, dtype=dtype, additional_args=args)
+        # Connect mode: if the server at `url` ALREADY serves `model`, use it as-is
+        # (a raw vLLM already running — e.g. a docker image you booted yourself). No
+        # control API needed. Otherwise treat `url` as a remote ML node and boot via
+        # /api/v1/inference/up (and tear down after).
+        already = False
         try:
-            yield url, None          # remote: no local server handle
-        finally:
-            inference_down(url)
+            wait_ready(url, model=model, timeout=8)
+            already = True
+        except Exception:
+            already = False
+        if already:
+            yield url, None          # connect: external server, leave it running
+        else:
+            args = list(DEFAULT_POC_SERVE_ARGS) + list(extra_args or []) + (["--enforce-eager"] if eager else [])
+            inference_up(url, model, dtype=dtype, additional_args=args)
+            try:
+                yield url, None      # remote ML node: no local server handle
+            finally:
+                inference_down(url)
     else:
         with serve(model, eager, extra_args) as srv:
             yield srv.url_root, srv  # local: handle for log-based provenance
@@ -210,7 +245,8 @@ def deploy_from_args(args, model: str, extra_args: Optional[List[str]] = None):
     with deploy(model, url=url, eager=eager, dtype=getattr(args, "dtype", "bfloat16"),
                 extra_args=extra) as (base_url, srv):
         args.eager = eager  # reflect the resolved value back
-        args.prov = {**env_info(), **(vllm_config(srv) if srv else {"server_url": url})}
+        args.prov = {**env_info(),
+                     **(vllm_config(srv) if srv else remote_config(url, want_backend, eager))}
         args.prov["engine"] = "eager" if eager else "cudagraph"
         args.prov["profile"] = getattr(args, "profile", None)
         args.prov["attention_requested"] = want_backend

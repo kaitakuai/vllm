@@ -16,8 +16,38 @@ class PrometheusResponse(Response):
     media_type = prometheus_client.CONTENT_TYPE_LATEST
 
 
+def _install_path_safe_route_name():
+    """FastAPI >=0.117 `include_router` inserts `_IncludedRouter` objects (no
+    `.path`) into app.routes. prometheus_fastapi_instrumentator's per-request
+    route-name lookup does `route.path` unconditionally and 500s every request.
+    Harden it: tolerate missing `.path` and descend into nested routers."""
+    from prometheus_fastapi_instrumentator import routing as _r
+    from starlette.routing import Match
+
+    if getattr(_r, "_vllm_path_safe", False):
+        return
+
+    def _safe(scope, routes, route_name=None):
+        for route in routes:
+            match, child_scope = route.matches(scope)
+            if match == Match.FULL:
+                path = getattr(route, "path", "") or ""
+                sub = getattr(route, "routes", None)
+                if sub:
+                    child = _safe({**scope, **child_scope}, sub, path)
+                    return None if child is None else path + child
+                return path or None
+            if match == Match.PARTIAL and route_name is None:
+                route_name = getattr(route, "path", None)
+        return route_name
+
+    _r._get_route_name = _safe
+    _r._vllm_path_safe = True
+
+
 def attach_router(app: FastAPI):
     """Mount prometheus metrics to a FastAPI app."""
+    _install_path_safe_route_name()
 
     registry = get_prometheus_registry()
 
