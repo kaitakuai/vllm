@@ -36,8 +36,12 @@ ARG GONKA_POC_REF
 ENV VLLM_ALLOW_INSECURE_SERIALIZATION=1
 
 # Install the gonka-poc plugin only — no transitive deps (see header).
+# Install from the GitHub source tarball rather than `git+https://…` because
+# the residual base image ships no `git` binary (pip's VCS path needs one).
+# GitHub serves /archive/<ref>.tar.gz over plain HTTP, so pip builds the
+# sdist with no git dependency. GONKA_POC_REF is a full SHA (reproducible).
 RUN pip install --no-cache-dir --no-deps \
-    "git+https://github.com/kaitakuai/gonka-poc@${GONKA_POC_REF}"
+    "gonka-poc @ https://github.com/kaitakuai/gonka-poc/archive/${GONKA_POC_REF}.tar.gz"
 
 # gonka-poc runtime deps that --no-deps skipped. On the CURRENT S1 residual
 # base every one of these is ALREADY satisfied:
