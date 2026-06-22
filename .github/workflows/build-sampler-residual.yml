@@ -1,7 +1,7 @@
 name: build-sampler-residual
 
 # Builds and publishes the kaitakuai sampler-stack residual image on top of
-# upstream vLLM 0.23.0 (cu129). This branch (poc-sampler-residual-v0.23)
+# upstream vLLM 0.23.0 (recommended default tag → CUDA 13.0). This branch (poc-sampler-residual-v0.23)
 # carries the 6-commit sampler stack (mixed-mode sampling, enforced tokens,
 # logprobs_mode, structured-output graceful degradation, InputBatch
 # bookkeeping, xpu thread-through). The wheel version baked into the image's
@@ -9,7 +9,7 @@ name: build-sampler-residual
 # '+' because the plus character is not a valid OCI tag character.
 #
 # This is an *overlay* build (Dockerfile.quick):
-#   FROM vllm/vllm-openai:v0.23.0-cu129
+#   FROM vllm/vllm-openai:v0.23.0
 #   COPY ./vllm/*.py over the installed vllm package
 # It does NOT recompile CUDA / .so artifacts, so each rebuild is ~3-5 min
 # regardless of total image size.
@@ -34,7 +34,7 @@ on:
   workflow_dispatch:
     inputs:
       base_image:
-        description: 'BASE_IMAGE override. Default: vllm/vllm-openai:v0.23.0-cu129.'
+        description: 'BASE_IMAGE override. Default: vllm/vllm-openai:v0.23.0.'
         required: false
       image_tag:
         description: 'Mutable image tag suffix. Default: 0.23.0-gonka.sampler1.'
@@ -72,7 +72,7 @@ jobs:
           INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
-          BASE_IMAGE="${INPUT_BASE_IMAGE:-vllm/vllm-openai:v0.23.0-cu129}"
+          BASE_IMAGE="${INPUT_BASE_IMAGE:-vllm/vllm-openai:v0.23.0}"
           IMAGE_TAG="${INPUT_IMAGE_TAG:-0.23.0-gonka.sampler1}"
           SHA9="${GITHUB_SHA:0:9}"
           # Image goes to a dedicated repo (kaitakuai/vllm-sampler-residual)

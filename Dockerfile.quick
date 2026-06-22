@@ -1,4 +1,7 @@
-ARG BASE_IMAGE=vllm/vllm-openai:v0.23.0-cu129
+# Ride vLLM's recommended default image (bare v0.23.0 tag → CUDA 13.0), not a
+# pinned cuXXX variant: take whatever CUDA toolkit upstream ships as default
+# for the release rather than locking an older minor.
+ARG BASE_IMAGE=vllm/vllm-openai:v0.23.0
 FROM ${BASE_IMAGE}
 
 # Kaitakuai sampler-stack residual overlay on top of upstream vLLM 0.23.0.
