@@ -3377,9 +3377,16 @@ class GPUModelRunner(
         if chat_rows is not None and spec_decode_metadata is None:
             n_full = mixed_batch_info['num_reqs_snapshot']
             if not chat_rows:  # all-PoC: no logits computed, no tokens produced
+                # Must be int32 to match the sampler's token contract (sampler.py
+                # casts to int32) and the int32 input_ids buffer. Under async
+                # scheduling this becomes prev_sampled_token_ids and is scatter_()'d
+                # into input_ids on a churning batch; scatter_ requires an exact
+                # dtype match (int64 here would raise), unlike the copy_() fast path
+                # which silently casts. The latter is why small/stable batches never
+                # caught it. See gpu_model_runner._prepare_input_ids.
                 return SamplerOutput(
                     sampled_token_ids=torch.zeros(
-                        (n_full, 1), dtype=torch.long, device=self.device),
+                        (n_full, 1), dtype=torch.int32, device=self.device),
                     logprobs_tensors=None,
                 )
             # logits is already chat-only (LM head ran on chat rows only).

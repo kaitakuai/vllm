@@ -56,6 +56,48 @@ def run_poc(url, target, model, seq_len, max_tokens, duration, warmup):
     return total, total * (max_tokens + 1), elapsed
 
 
+def run_poc_pipeline(url, target, model, seq_len, max_tokens, duration, warmup):
+    """APPLES-TO-APPLES with run_chat, NO door gap: BATCH worker threads each fire a
+    SINGLE-nonce /generate back-to-back, so ~BATCH nonces are always in flight and the
+    vLLM scheduler keeps the GPU continuously saturated. The serial run_poc above sends
+    one 32-nonce request then WAITS (a gap between batches, mirrors production load);
+    this version removes that gap by overlapping requests exactly like run_chat's 32
+    continuous single-sequence workers -> fair PoC-vs-inference comparison.
+    Returns (total_nonces, total_steps, elapsed)."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+    c = {"next": 0, "done": 0}
+    lock = threading.Lock()
+    state = {"deadline": 0.0}
+
+    def worker():
+        while time.monotonic() < state["deadline"]:
+            with lock:
+                n = c["next"]; c["next"] += 1
+            try:
+                request_generate(url, target=target, model=model, nonces=[n],
+                                 seq_len=seq_len, max_tokens=max_tokens)
+            except Exception:
+                continue  # skip a transient error, keep the pipeline full
+            with lock:
+                c["done"] += 1
+
+    def phase(seconds):
+        state["deadline"] = time.monotonic() + seconds
+        with ThreadPoolExecutor(max_workers=BATCH) as ex:
+            for f in [ex.submit(worker) for _ in range(BATCH)]:
+                f.result()
+
+    if warmup:
+        phase(warmup)
+    with lock:
+        c["done"] = 0
+    t0 = time.monotonic()
+    phase(duration)
+    elapsed = time.monotonic() - t0
+    return c["done"], c["done"] * (max_tokens + 1), elapsed
+
+
 async def _chat_one(client, url, model, max_tokens, idx):
     body = {
         "model": model,
@@ -135,6 +177,10 @@ def main():
     ap.add_argument("--max-tokens", type=int, default=256)
     ap.add_argument("--duration", type=float, default=30.0)
     ap.add_argument("--warmup", type=float, default=15.0)
+    ap.add_argument("--poc-load", choices=["serial", "pipeline"], default="pipeline",
+                    help="pipeline=32 continuous single-nonce workers, NO gap, "
+                         "apples-to-apples with chat (default). serial=one 32-nonce "
+                         "request then wait (production load; has an inter-batch gap).")
     ap.add_argument("--save")
     a = ap.parse_args()
 
@@ -142,15 +188,19 @@ def main():
     with deploy_from_args(a, a.model) as (url, srv):  # one server lifetime for all modes
         for mode in modes:
             if mode == "poc":
-                total, work, elapsed = run_poc(url, a.target, a.model, a.seq_len,
-                                               a.max_tokens, a.duration, a.warmup)
+                poc_fn = run_poc_pipeline if a.poc_load == "pipeline" else run_poc
+                total, work, elapsed = poc_fn(url, a.target, a.model, a.seq_len,
+                                              a.max_tokens, a.duration, a.warmup)
             else:
                 total, work, elapsed = run_chat(url, a.model, a.max_tokens, a.duration, a.warmup)
             res = _results(mode, total, work, elapsed, a.max_tokens)
+            if mode == "poc":
+                res["poc_load"] = a.poc_load   # serial (production) vs pipeline (fair)
             _print(res, a.prov)
             if a.save:
                 meta = {"model": a.model, "mode": mode, "seq_len": a.seq_len,
-                        "max_tokens": a.max_tokens, "batch_size": BATCH, **a.prov}
+                        "max_tokens": a.max_tokens, "batch_size": BATCH,
+                        "poc_load": (a.poc_load if mode == "poc" else None), **a.prov}
                 path = _save_path(a.save, mode, len(modes) > 1)
                 save_run(path, meta, [], results=res)
                 print(f"saved -> {path}")

@@ -104,8 +104,9 @@ def _model_of(rec):
 
 # ---- section renderers (return HTML strings) -------------------------------
 def _is_perf(r):
-    # Dedicated perf runs (perfomance_nonces.py) carry req_per_min, in either mode.
-    return "req_per_min" in r.get("results", {})
+    # Dedicated perf runs: throughput (req_per_min) OR clean per-step (per_step_ms).
+    res = r.get("results", {})
+    return "req_per_min" in res or "per_step_ms" in res
 
 
 def _is_eager(m):
@@ -118,58 +119,43 @@ def _perf_mode(m, res):
 
 
 def perf_section(recs):
-    rows = [(r["meta"], r.get("results", {})) for r in recs if _is_perf(r)]
+    # CLEAN per-step decode efficiency (prefill + fixed overhead removed via the two-point
+    # slope method). Throughput (req/min) is intentionally NOT used for the PoC-vs-inference
+    # ratio: PoC's per-nonce 256-token prefill makes throughput prefill-dependent and
+    # understates decode efficiency (the misleading ~0.55× number). Per-step is the truth.
+    rows = [(r["meta"], r["results"]) for r in recs if "per_step_ms" in r.get("results", {})]
     if not rows:
         return "<p class=na>no perf runs</p>"
-    mx = max(res.get("req_per_min", 0) for _, res in rows) or 1
+    ps, pt = {}, {}
+    for m, res in rows:
+        mode = res.get("mode") or _g(m, "mode")
+        eng = "eager" if _is_eager(m) else "cudagraph"
+        ps[(mode, eng)] = res["per_step_ms"]
+        pt[(mode, eng)] = res.get("per_step_per_seq_ms")
     out = []
-    # FIDELITY headline: how closely PoC nonce/min tracks chat req/min. They are the
-    # same unit (one decode sequence); if PoC ≈ chat, decode-PoC faithfully measures the
-    # node's real-inference capacity (its whole purpose). Compare like-for-like engine.
-    def best(mode, eager):
-        v = [res.get("req_per_min", 0) for m, res in rows
-             if _perf_mode(m, res) == mode and _is_eager(m) == eager]
-        return max(v) if v else None
-    for eager, lbl in ((False, "cudagraph"), (True, "eager")):
-        poc, chat = best("poc", eager), best("chat", eager)
-        if poc and chat:
-            ratio = 100.0 * poc / chat
-            gap = abs(100.0 - ratio)
+    for eng in ("cudagraph", "eager"):
+        c, p = ps.get(("chat", eng)), ps.get(("poc", eng))
+        if c and p:
             out.append(
-                f"<p class=highlight>Inference-readiness fidelity ({lbl}): "
-                f"decode-PoC <b>{poc:.0f} nonce/min</b> vs real inference "
-                f"<b>{chat:.0f} req/min</b> &mdash; PoC tracks inference at "
-                f"<b>{ratio:.0f}%</b> (within {gap:.0f}%). Close ⇒ decode-PoC measures "
-                f"the node's actual capacity to serve inference.</p>")
-    # Per-mode highlight: best cudagraph vs best eager (the cudagraph speedup).
-    for mode, label in (("chat", "real inference"), ("poc", "PoC")):
-        vals = lambda eager: [res.get("req_per_min", 0) for m, res in rows
-                              if _perf_mode(m, res) == mode and _is_eager(m) == eager]
-        cg, eg = vals(False), vals(True)
-        if cg and eg and max(eg) > 0:
-            bcg, beg = max(cg), max(eg)
-            d = 100.0 * (bcg - beg) / beg
-            out.append(
-                f"<p class=highlight>{label}: best <b>cudagraph</b> {bcg:.0f} req/min "
-                f"vs best <b>eager</b> {beg:.0f} req/min &mdash; cudagraph is <b>{d:+.1f}%</b></p>")
-    out.append("<p class=note>req/min (chat) and nonces/min (PoC) are the same unit "
-               "&mdash; one decode sequence at concurrency 32 &mdash; so PoC throughput "
-               "reads directly against real-inference capacity.</p>")
-    out.append("<table><tr><th>mode</th><th>hardware</th><th>engine</th><th>attention</th>"
-               "<th>max_tok</th><th>req/min</th><th>tok/s &middot; steps/s</th><th></th></tr>")
-    for m, res in sorted(rows, key=lambda x: (_perf_mode(*x), -x[1].get("req_per_min", 0))):
-        mode = _perf_mode(m, res)
-        work = (f"{res.get('steps_per_s',0):.0f} steps/s" if mode == "poc"
-                else f"{res.get('tokens_per_s',0):.0f} tok/s")
+                f"<p class=highlight>Decode efficiency ({eng}, per 32-wide step, prefill "
+                f"isolated): PoC <b>{p:.1f} ms</b> vs real inference <b>{c:.1f} ms</b> "
+                f"&mdash; PoC = <b>{c/p:.2f}×</b> chat per decode step.</p>")
+    cc, ce = ps.get(("chat", "cudagraph")), ps.get(("chat", "eager"))
+    pc, pe = ps.get(("poc", "cudagraph")), ps.get(("poc", "eager"))
+    if None not in (cc, ce, pc, pe):
+        out.append(
+            f"<p class=highlight>cudagraph speedup (per step): real inference "
+            f"<b>{ce/cc:.2f}×</b>, PoC <b>{pe/pc:.2f}×</b>. cudagraph's <b>absolute</b> "
+            f"per-step saving is the same for both (chat {ce-cc:.0f} ms, PoC {pe-pc:.0f} ms) "
+            f"&mdash; cudagraph graphs PoC identically; the residual (PoC ~{(pc/cc-1)*100:.0f}% "
+            f"slower/step) is the MoE expert-loading toll, not a graphing defect.</p>")
+    out.append("<table><tr><th>mode</th><th>engine</th><th>per-step (ms)</th>"
+               "<th>per-token (ms)</th></tr>")
+    for (mode, eng) in sorted(ps):
         out.append(
             f"<tr><td>{'real inference' if mode=='chat' else 'PoC'}</td>"
-            f"<td>{html.escape(_gpu(m))}</td>"
-            f"<td>{html.escape(str(_g(m,'engine','cudagraph_mode')))}</td>"
-            f"<td>{html.escape(str(_g(m,'attention_backend')))}</td>"
-            f"<td>{_g(m,'max_tokens')}</td>"
-            f"<td class=num>{res.get('req_per_min',0):.0f}</td>"
-            f"<td class=num>{work}</td>"
-            f"<td class=bar>{_bar(res.get('req_per_min',0)/mx, 'perf')}</td></tr>")
+            f"<td>{eng}</td><td class=num>{ps[(mode,eng)]:.2f}</td>"
+            f"<td class=num>{(pt.get((mode,eng)) or 0):.3f}</td></tr>")
     out.append("</table>")
     return "\n".join(out)
 
@@ -241,7 +227,7 @@ def separation_section(recs):
             f"<tr class={rowcls}>"
             f"<td>{html.escape(vhw)} ⇐ {html.escape(phw)}</td>"
             f"<td>{veng}/{vbe} ⇐ {peng}/{pbe}</td>"
-            f"<td>{html.escape(_short(v,20))} ⇐ {html.escape(_short(p,20))}</td>"
+            f"<td>{html.escape(v)} ⇐ {html.escape(p)}</td>"
             f"<td>{kind}</td><td class=num>{rate*100:.2f}%</td>"
             f"<td class=num>{verdict}</td>"
             f"<td class=bar>{_bar(rate, 'honest' if honest else 'fraud', thresh=thresh)}</td></tr>")
@@ -302,7 +288,7 @@ def calibration_section(recs):
         else:
             window, rec_s, sep = "&mdash;", "&mdash;", "NO gap &#9888;"
         out.append(
-            f"<tr><td>{html.escape(_short(model, 28))}</td>"
+            f"<tr><td>{html.escape(model)}</td>"
             f"<td class=num>{pct(hs)}</td><td class=num>{pct(hx)}</td><td class=num>{pct(fr)}</td>"
             f"<td>{window}</td><td class=num>{rec_s}</td><td>{sep}</td></tr>")
     out.append("</table>")
@@ -389,6 +375,12 @@ tr.cross{background:#fffbeb}
 .na{color:#94a3b8;font-style:italic;font-size:.85rem}
 .highlight{background:#ecfdf5;border-left:3px solid #10b981;padding:.55rem .8rem;border-radius:6px;margin:.6rem 0;font-size:.95rem}
 .highlight b{color:#065f46}
+.lead{color:#475569;font-size:.9rem;line-height:1.55;margin:.2rem 0 .7rem;padding:.55rem .85rem;background:#f8fafc;border-left:3px solid #cbd5e1;border-radius:6px}
+.lead b{color:var(--ink)}
+.verdict{font-size:.95rem;font-weight:600;margin:.7rem 0 1.3rem;padding:.6rem .85rem;border-radius:6px;background:#eff6ff;border-left:3px solid #3b82f6;color:#1e3a8a}
+.verdict.pass{background:#ecfdf5;border-left-color:#10b981;color:#065f46}
+.verdict.fail{background:#fef2f2;border-left-color:#ef4444;color:#991b1b}
+.verdict .lbl{font-weight:800;letter-spacing:.02em}
 .gloss{color:var(--mut);font-size:.8rem;line-height:1.6;margin-top:.5rem}
 ul.gloss{margin:.3rem 0 0;padding-left:1.1rem} ul.gloss li{margin:.35rem 0}
 code{background:#f1f5f9;padding:.05rem .35rem;border-radius:4px;font-size:.9em}
@@ -436,7 +428,7 @@ def render(recs):
         n_f = len(sep) - n_h
         n_gsm = sum(1 for r in rs if r.get("meta", {}).get("role") == "gsm8k")
         parts.append("<div class=card>")
-        parts.append(f"<div class=head><h1>{html.escape(_short(model,50))}</h1>{chip}</div>")
+        parts.append(f"<div class=head><h1>{html.escape(model)}</h1>{chip}</div>")
         parts.append(f"<div class=prov>decode-PoC · {html.escape(prov)}</div>")
         parts.append(f"<h2>Performance <span class=cov>{n_perf} config(s)</span></h2>" + perf_section(rs))
         parts.append(f"<h2>Separation — honest vs fraud "

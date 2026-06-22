@@ -43,6 +43,10 @@ def pytest_configure(config: pytest.Config) -> None:
         "markers",
         "integration: marks tests that require a running vLLM server",
     )
+    config.addinivalue_line(
+        "markers",
+        "gpu: marks tests that require a GPU (e.g. MLA-capable for Kimi/DeepSeek wrap check)",
+    )
 
 
 @pytest.fixture(scope="session")
