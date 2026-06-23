@@ -344,3 +344,103 @@ def apply_haar_rotation(
         y = y - 2 * dot * v_batch
 
     return y
+
+
+# ---------------------------------------------------------------------------
+# GPU-native decode chaining  (ported from axeltec poc-v0.20-decode-poc-cg)
+# ---------------------------------------------------------------------------
+# The legacy decode chain (generate_decode_inputs / random_pick_indices) builds
+# each step's seed with SHA256 of a string containing prev_k -> prev_k must be a
+# Python int -> a GPU->CPU sync every step -> forces --no-async-scheduling.
+#
+# These functions keep prev_k on the GPU as a tensor and mix it in with on-GPU
+# murmur3. block_hash/public_key/nonce are CONSTANT per request, so their SHA256
+# base seed is computed ONCE (no per-step sync); only step + prev_k are mixed per
+# step, fully on device. This is a NEW seed scheme: VALUES DIFFER from the
+# SHA256-string path. Selected at runtime via GONKA_POC_SEED_SCHEME=gpu_native
+# (legacy = default, for A-parity). Distinct salts separate the decode-embed
+# stream from the dim-pick stream.
+
+_SALT_DECODE_EMBED = 0x0D
+_SALT_DECODE_PICK = 0x91
+_MIX_A = 0x9E3779B1  # golden-ratio odd constant
+_MIX_B = 0x85EBCA77
+
+
+def decode_base_seeds(
+    block_hash: str,
+    public_key: str,
+    nonces: List[int],
+    device: torch.device,
+) -> torch.Tensor:
+    """Per-nonce base seed (constant for the whole request) -> [B] int64 on device.
+    Computed once; carries no per-step dependency, so the host SHA256 here is fine."""
+    seeds = [_seed_from_string(f"{block_hash}_{public_key}_nonce{n}") for n in nonces]
+    return torch.tensor(seeds, dtype=torch.int64, device=device)
+
+
+def _step_seeds(
+    base_seeds: torch.Tensor, step, prev_k: torch.Tensor, salt: int
+) -> torch.Tensor:
+    """Per-step seed = on-GPU murmur3 mixing base (per nonce) with step + prev_k.
+
+    base_seeds [B] int64 (constant), prev_k [B] int64 (chained on device, NEVER
+    .item()'d). step is a host int (same for the whole batch) OR a [B] int64 tensor
+    (per-row step). Returns [B] int64 fully on device, so the decode chain has no
+    GPU->CPU sync. The per-row result is identical to calling this once per row."""
+    if torch.is_tensor(step):
+        step_term = step.to(torch.int64).view(-1) * _MIX_B + salt
+    else:
+        step_term = int(step) * _MIX_B + salt
+    key = ((prev_k.to(torch.int64).view(-1) & 0xFFFFFFFF) * _MIX_A
+           + step_term) & 0xFFFFFFFF
+    return _batched_murmur3_32(key.view(-1, 1), base_seeds.view(-1, 1)).view(-1)
+
+
+def _batched_normal_t(seeds: torch.Tensor, n: int, device: torch.device) -> torch.Tensor:
+    """Like _batched_normal but `seeds` is already an int64 tensor [B] (no host
+    list). Returns [B, n] standard normals, fully on device."""
+    batch_size = seeds.shape[0]
+    n_pairs = (n + 1) // 2
+    total = n_pairs * 2
+    indices = torch.arange(total, device=device, dtype=torch.int32).unsqueeze(0).expand(batch_size, -1)
+    h = _batched_murmur3_32(indices, seeds.view(-1, 1))
+    u = h.to(torch.float32) / 4294967296.0
+    u1 = torch.clamp(u[:, :n_pairs], min=1e-10)
+    u2 = u[:, n_pairs:]
+    z0 = torch.sqrt(-2.0 * torch.log(u1)) * torch.cos(2.0 * math.pi * u2)
+    z1 = torch.sqrt(-2.0 * torch.log(u1)) * torch.sin(2.0 * math.pi * u2)
+    return torch.cat([z0, z1], dim=1)[:, :n]
+
+
+def generate_decode_inputs_gpu(
+    base_seeds: torch.Tensor,
+    prev_k: torch.Tensor,
+    step: int,
+    dim: int,
+    device: torch.device,
+    dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
+    """GPU-native counterpart of generate_decode_inputs: next decode-step input
+    embedding chained to prev_k (tensor). Returns [B, 1, dim]."""
+    seeds = _step_seeds(base_seeds, step, prev_k, _SALT_DECODE_EMBED)
+    return _batched_normal_t(seeds, dim, device).to(dtype).unsqueeze(1)
+
+
+def random_pick_indices_gpu(
+    base_seeds: torch.Tensor,
+    prev_k: torch.Tensor,
+    step: int,
+    dim: int,
+    k: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """GPU-native counterpart of random_pick_indices (decode): k dims per row,
+    seed chained to prev_k (tensor). Returns [B, k] int64."""
+    if k <= 0 or k > dim:
+        raise ValueError(f"k must be in [1, dim], got k={k}, dim={dim}")
+    seeds = _step_seeds(base_seeds, step, prev_k, _SALT_DECODE_PICK)
+    all_idx = torch.arange(dim, device=device, dtype=torch.int32).unsqueeze(0).expand(seeds.shape[0], -1)
+    scores = _batched_murmur3_32(all_idx, seeds.view(-1, 1))
+    _, chosen = torch.topk(-scores, k=k, largest=True, sorted=False, dim=1)
+    return chosen.to(torch.int64)

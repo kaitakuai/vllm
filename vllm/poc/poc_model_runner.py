@@ -26,6 +26,9 @@ from .gpu_random import (
     generate_decode_inputs,
     random_pick_indices,
     apply_haar_rotation,
+    decode_base_seeds,
+    generate_decode_inputs_gpu,
+    random_pick_indices_gpu,
 )
 from .layer_hooks import LayerHouseholderHook, poc_forward_context
 
@@ -869,6 +872,19 @@ def execute_poc_forward(
                 "reduce the PoC batch size or max_tokens."
             )
 
+        # Seed-scheme selector (branch B port). legacy = SHA256-string chaining
+        # (default, A-parity); gpu_native = Ilya's device-tensor murmur3 chaining
+        # (DIFFERENT seed VALUES). Our harness is synchronous (collective_rpc), so
+        # prev_k can stay a host list and be cast per step — gpu_native here changes
+        # only the seed MATH, not sync behaviour (that benefit is for C's async path).
+        use_gpu_native_seeds = (
+            os.environ.get("GONKA_POC_SEED_SCHEME") == "gpu_native"
+        )
+        base_seeds = (
+            decode_base_seeds(block_hash, public_key, nonces, device)
+            if use_gpu_native_seeds else None
+        )
+
         for step in range(1, max_tokens + 1):
             if tp_group.world_size > 1:
                 # Rendezvous + pin the trajectory: all TP ranks must seed the
@@ -879,11 +895,20 @@ def execute_poc_forward(
                 else:
                     prev_k = list(broadcast_tensor_dict(src=0)["prev_k"])
 
-            # Decode embedding seeded by prev_k (one token per nonce).
-            decode_embeds = generate_decode_inputs(
-                block_hash, public_key, nonces, prev_k,
-                step=step, dim=hidden_size, device=device, dtype=dtype,
-            )  # [batch_size, 1, hidden_size]
+            # Decode embedding seeded by prev_k (one token per nonce). gpu_native
+            # (branch B) = Ilya's device-tensor murmur3 chaining (DIFFERENT seed
+            # values); else legacy SHA256-string chaining (A). prev_k stays a host
+            # list (sync harness) and is cast per step for the gpu_native path.
+            if use_gpu_native_seeds:
+                prev_k_t = torch.as_tensor(prev_k, dtype=torch.int64, device=device)
+                decode_embeds = generate_decode_inputs_gpu(
+                    base_seeds, prev_k_t, step, hidden_size, device, dtype,
+                )  # [batch_size, 1, hidden_size]
+            else:
+                decode_embeds = generate_decode_inputs(
+                    block_hash, public_key, nonces, prev_k,
+                    step=step, dim=hidden_size, device=device, dtype=dtype,
+                )  # [batch_size, 1, hidden_size]
             decode_pos = torch.full(
                 (batch_size,), seq_len + step - 1, device=device, dtype=torch.long
             )
@@ -921,12 +946,19 @@ def execute_poc_forward(
                 last_hidden_dec.norm(dim=-1, keepdim=True) + 1e-8
             )
 
-            # Dimension subset is chained on prev_k AND salted with the step
-            # index (without the step there are only SPHERE_POINTS subsets).
-            sph_idx_dec = random_pick_indices(
-                block_hash, public_key, nonces, hidden_size, SPHERE_DIM, device,
-                prev_point_ids=prev_k, step=step,
-            )
+            # Dimension subset for the sphere k-id, chained on prev_k (salted with
+            # the step index). gpu_native (branch B): device murmur3 pick; else
+            # legacy string-seed pick. This is the k-id trajectory = "Ilya's math".
+            if use_gpu_native_seeds:
+                prev_k_t = torch.as_tensor(prev_k, dtype=torch.int64, device=device)
+                sph_idx_dec = random_pick_indices_gpu(
+                    base_seeds, prev_k_t, step, hidden_size, SPHERE_DIM, device,
+                )
+            else:
+                sph_idx_dec = random_pick_indices(
+                    block_hash, public_key, nonces, hidden_size, SPHERE_DIM, device,
+                    prev_point_ids=prev_k, step=step,
+                )
             xk_sph_dec = project_to_sphere(
                 torch.gather(last_hidden_dec, 1, sph_idx_dec)
             )
