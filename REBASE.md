@@ -4,7 +4,7 @@ This is a permanent thin fork of `vllm-project/vllm`, owned by Kaitaku.
 ADR-0014 in `mlnode-foundry/docs/adr/0014-residual-fork-permanent-infra.md`
 treats this branch as permanent infrastructure (the Layer 3 upstream pathway
 is deferred without timeline). Each new vLLM minor is rebased mechanically
-by cherry-picking the same 6-commit sampler stack onto the upstream tag.
+by cherry-picking the same commit stack (6 sampler + 1 request-ingestion) onto the upstream tag.
 
 ## When upstream cuts `vM.N`
 
@@ -21,8 +21,8 @@ by cherry-picking the same 6-commit sampler stack onto the upstream tag.
    git checkout -b poc-sampler-residual-vM.N vM.N
    ```
 
-3. Cherry-pick the 6 sampler SHAs in chronological order from the
-   most-recent residual branch (`poc-sampler-residual-v<prev>`):
+3. Cherry-pick the 7 SHAs (6 sampler + row 7 request-ingestion) in chronological
+   order from the most-recent residual branch (`poc-sampler-residual-v<prev>`):
 
    | # | SHA on v0.23 branch | Subject |
    |---|---------------------|---------|
@@ -32,9 +32,22 @@ by cherry-picking the same 6-commit sampler stack onto the upstream tag.
    | 4 | `f2bbeaac8` | feat(worker): port `InputBatch` enforced-tokens and logprobs-mode bookkeeping |
    | 5 | `4996d5af7` | feat(structured-output): graceful degradation on grammar token rejection |
    | 6 | `8d4e322e0` | fix(sampler): thread `need_processed_logprobs` through `forward_xpu` |
+   | 7 | `ca9e02dd6` | feat(validation): add enforced_tokens request ingestion (HTTP -> SamplingParams) |
+
+   Rows 1-6 are the **sampler stack** (private `vllm.v1.*` surfaces). Row 7 is the
+   **request-ingestion layer** added 2026-06-25: `vllm/validation.py`
+   (`EnforcedTokens` helper) + the `ChatCompletionRequest.{enforced_tokens,
+   enforced_str, logprobs_mode}` fields and the `OpenAIServingChat` glue that writes
+   `sampling_params.enforced_token_ids`. Without row 7 the sampler enforcement
+   (rows 1-6) is present but never fires — a validator's payload is silently dropped
+   by Pydantic and inference validation does not work. Its surfaces are pinned by
+   `tests/contract/test_request_validation_surface.py` (rows 1-6 by
+   `test_sampler_surface.py`). NOTE: row 7 touches the OpenAI entrypoint layer
+   (`vllm/entrypoints/openai/**`), which churns faster upstream than the sampler
+   internals — expect its hunks to be the most rebase-conflict-prone.
 
    ```bash
-   git cherry-pick 1c5368212 3176a941c c2db96992 f2bbeaac8 4996d5af7 8d4e322e0
+   git cherry-pick 1c5368212 3176a941c c2db96992 f2bbeaac8 4996d5af7 8d4e322e0 ca9e02dd6
    ```
 
    > **TODO (future rebase):** these SHAs are the commit IDs on
@@ -51,6 +64,7 @@ by cherry-picking the same 6-commit sampler stack onto the upstream tag.
    > git log --oneline --grep='feat(worker): port InputBatch' poc-sampler-residual-v<prev>
    > git log --oneline --grep='feat(structured-output): graceful degradation' poc-sampler-residual-v<prev>
    > git log --oneline --grep='fix(sampler): thread need_processed_logprobs through forward_xpu' poc-sampler-residual-v<prev>
+   > git log --oneline --grep='feat(validation): add enforced_tokens request ingestion' poc-sampler-residual-v<prev>
    > ```
 
 4. Update `setup.py` `get_vllm_version()` to bump the local-version
