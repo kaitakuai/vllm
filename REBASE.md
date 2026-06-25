@@ -32,7 +32,7 @@ by cherry-picking the same commit stack (6 sampler + 1 request-ingestion) onto t
    | 4 | `f2bbeaac8` | feat(worker): port `InputBatch` enforced-tokens and logprobs-mode bookkeeping |
    | 5 | `4996d5af7` | feat(structured-output): graceful degradation on grammar token rejection |
    | 6 | `8d4e322e0` | fix(sampler): thread `need_processed_logprobs` through `forward_xpu` |
-   | 7 | `ca9e02dd6` | feat(validation): add enforced_tokens request ingestion (HTTP -> SamplingParams) |
+   | 7 | `e41e9e606` | feat(validation): add enforced_tokens request ingestion (HTTP -> SamplingParams) |
 
    Rows 1-6 are the **sampler stack** (private `vllm.v1.*` surfaces). Row 7 is the
    **request-ingestion layer** added 2026-06-25: `vllm/validation.py`
@@ -47,7 +47,7 @@ by cherry-picking the same commit stack (6 sampler + 1 request-ingestion) onto t
    internals — expect its hunks to be the most rebase-conflict-prone.
 
    ```bash
-   git cherry-pick 1c5368212 3176a941c c2db96992 f2bbeaac8 4996d5af7 8d4e322e0 ca9e02dd6
+   git cherry-pick 1c5368212 3176a941c c2db96992 f2bbeaac8 4996d5af7 8d4e322e0 e41e9e606
    ```
 
    > **TODO (future rebase):** these SHAs are the commit IDs on
