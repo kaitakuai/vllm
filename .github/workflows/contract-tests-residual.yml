@@ -98,11 +98,24 @@ jobs:
               vllm/v1/worker/gpu_input_batch.py \
               vllm/v1/worker/gpu_model_runner.py \
               vllm/v1/structured_output/__init__.py \
-              vllm/v1/structured_output/backend_xgrammar.py; do
+              vllm/v1/structured_output/backend_xgrammar.py \
+              vllm/entrypoints/openai/chat_completion/protocol.py \
+              vllm/entrypoints/openai/chat_completion/serving.py \
+              vllm/entrypoints/openai/engine/serving.py; do
             rel=${f#vllm/}
             dst="$VLLM_INSTALL_DIR/$rel"
             [ -f "$f" ] || { echo "ERROR: residual fork missing $f"; exit 1; }
             [ -f "$dst" ] || { echo "ERROR: upstream vllm missing $dst — overlay target moved"; exit 1; }
+            cp -v "$f" "$dst"
+          done
+          # NEW file added by row 7 (no upstream dst to overlay onto):
+          # vllm/validation.py does not exist upstream, so copy it WITHOUT the
+          # "dst must exist" assertion the overlay loop applies.
+          for f in \
+              vllm/validation.py; do
+            rel=${f#vllm/}
+            dst="$VLLM_INSTALL_DIR/$rel"
+            [ -f "$f" ] || { echo "ERROR: residual fork missing $f"; exit 1; }
             cp -v "$f" "$dst"
           done
 
