@@ -63,7 +63,7 @@ def cmd_validate(a):
             "seq_len": seq, "max_tokens": mt, "k_dim": rmeta["k_dim"], "block_hash": rmeta["block_hash"],
             "public_key": rmeta["public_key"], "nonces": nonces, "batch_size": 32, "ref": a.ref,
             "prover_engine": rmeta.get("engine"), "prover_profile": rmeta.get("profile"), **a.prov}
-    save_run(a.save, meta, [],
+    save_run(a.save, meta, resp.get("artifacts", []),
              results={"validator_model": a.model, "prover_model": rmeta["model"], "honest": honest,
                       "rate": rate, "n_mismatch": resp["n_mismatch"], "fraud_detected": resp["fraud_detected"],
                       "prover_gpu": rmeta.get("gpu"),  # prover HW (this run is the validator's HW)

@@ -8,7 +8,7 @@ import torch
 from vllm.poc.sphere import (
     SPHERE_DIM,
     SPHERE_POINTS,
-    _SPHERE_CODEBOOK,
+    get_sphere_codebook,
     project_to_sphere,
     nearest_sphere_index,
     build_equidistant_codebook,
@@ -29,17 +29,17 @@ def test_project_to_sphere_handles_zero():
 
 
 def test_codebook_shape():
-    assert _SPHERE_CODEBOOK.shape == (SPHERE_POINTS, SPHERE_DIM)
+    assert get_sphere_codebook().shape == (SPHERE_POINTS, SPHERE_DIM)
 
 
 def test_codebook_points_are_unit_norm():
-    norms = _SPHERE_CODEBOOK.norm(dim=-1)
+    norms = get_sphere_codebook().norm(dim=-1)
     assert torch.allclose(norms, torch.ones_like(norms), atol=1e-4)
 
 
 def test_codebook_points_are_distinct():
     # Thomson spread: no two points coincide. Min pairwise cosine < 1.
-    cb = _SPHERE_CODEBOOK.float()
+    cb = get_sphere_codebook().float()
     sims = cb @ cb.T
     off_diag = sims - torch.eye(SPHERE_POINTS) * 2.0  # push diagonal out of the way
     assert off_diag.max().item() < 0.999, "two codebook points are (near) identical"
@@ -47,13 +47,13 @@ def test_codebook_points_are_distinct():
 
 def test_nearest_index_maps_codebook_point_to_itself():
     # each codebook point's nearest neighbour is itself
-    idx = nearest_sphere_index(_SPHERE_CODEBOOK, _SPHERE_CODEBOOK)
+    idx = nearest_sphere_index(get_sphere_codebook(), get_sphere_codebook())
     assert torch.equal(idx, torch.arange(SPHERE_POINTS))
 
 
 def test_nearest_index_in_range():
     q = project_to_sphere(torch.randn(64, SPHERE_DIM))
-    idx = nearest_sphere_index(q, _SPHERE_CODEBOOK)
+    idx = nearest_sphere_index(q, get_sphere_codebook())
     assert idx.shape == (64,)
     assert int(idx.min()) >= 0 and int(idx.max()) < SPHERE_POINTS
 

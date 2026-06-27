@@ -130,6 +130,10 @@ class PoCOutput:
     # Validation mode only: number of steps where the locally computed k-id
     # differed from the reference inference k-id.  -1 for inference requests.
     n_sphere_mismatches: int = -1
+    # Number of decode steps whose hidden was non-finite (NaN/Inf) — a COMPUTE
+    # FAULT (GPU contention / kernel fault), NOT fraud. Excluded from
+    # n_sphere_mismatches; >0 means the trajectory is suspect and should be re-run.
+    n_nan_steps: int = 0
     # Debug mode (debug=True in request): per-step sphere slice indices and
     # values.  Index 0 = prefill, 1..N = decode steps.
     # sph_indices_steps[step] : list of SPHERE_DIM int indices into hidden state

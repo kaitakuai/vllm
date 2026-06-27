@@ -17,7 +17,7 @@ import os
 import torch
 from torch import nn
 
-from .gpu_random import generate_householder_vector
+from .gpu_random import generate_householder_vector, seeded_expert_logits
 
 # Debug-only TP guard (VLLM_POC_DEBUG_TP=1): PoC reflection vectors / embeds are
 # generated per rank from deterministic seeds and MUST be bit-identical across
@@ -119,6 +119,40 @@ class PoCEmbeddingWrapper(nn.Module):
         return torch.where(m, self.poc_embeds[:n].to(out.dtype), out)
 
 
+class PoCRouterWrapper(nn.Module):
+    """Wraps an MoE gate (router Linear). For PoC rows (mask True) it REPLACES the
+    router logits with deterministic, hidden-INDEPENDENT seeded logits, so MoE
+    expert selection (and gate weights) no longer read the noise-prone hidden ->
+    removes the routing nondeterminism that drives the decode-PoC honest floor.
+    Chat rows (mask False) keep their natural logits untouched. ``force`` is this
+    layer's seeded logits buffer ([n_experts], updated per block_hash in place);
+    ``mask`` is the shared per-row PoC mask. Static-shape -> cudagraph-safe."""
+
+    def __init__(self, inner: nn.Module, force: torch.Tensor, mask: torch.Tensor):
+        super().__init__()
+        self.inner = inner
+        self.register_buffer("poc_force", force, persistent=False)  # [n_experts]
+        self.register_buffer("poc_mask", mask, persistent=False)
+
+    def __getattr__(self, name: str):
+        # Delegate unknown attributes (e.g. `.weight`, quant scales) to the wrapped
+        # gate, so backends that read gate attributes directly (FlashInfer MoE init)
+        # still resolve them — FlashAttention doesn't, which is why it worked there.
+        try:
+            return super().__getattr__(name)
+        except AttributeError:
+            return getattr(super().__getattr__("inner"), name)
+
+    def forward(self, *args, **kwargs):
+        out = self.inner(*args, **kwargs)
+        logits = out[0] if isinstance(out, tuple) else out
+        n = logits.shape[0]
+        m = self.poc_mask[:n].unsqueeze(-1)
+        forced = self.poc_force.to(logits.dtype).unsqueeze(0).expand(n, -1)
+        logits = torch.where(m, forced, logits)
+        return (logits, *out[1:]) if isinstance(out, tuple) else logits
+
+
 class PoCNativeState:
     """Per-model PoC transform state: PER-ROW reflection vectors per wrapped layer,
     a shared row mask, and a PoC-embeds buffer. Held on the runner; updated each
@@ -143,6 +177,12 @@ class PoCNativeState:
         self.embeds = torch.zeros(max_tokens, hidden_size, device=device, dtype=dtype)
         self._hash_cache: dict[str, list] = {}      # block_hash -> per-layer vectors
         self._last_row_hashes: list | None = None   # skip redundant per-step rescatter
+        # seeded-routing (filled by attach_native_poc when enabled): per-MoE-layer
+        # forced router-logits buffer + (n_experts, top_k); refreshed per block_hash.
+        self.router_force: list = []
+        self.router_meta: list = []                 # [(n_experts, top_k), ...]
+        self._route_cache: dict[str, list] = {}     # block_hash -> per-layer logits
+        self._last_route_hash: str | None = None
 
     def set_embeds(self, row_embeds: torch.Tensor) -> None:
         """Write the PoC rows' input embeds into the buffer (in place)."""
@@ -185,6 +225,26 @@ class PoCNativeState:
                 buf[row].copy_(vs[i].to(buf.dtype))
         self._last_row_hashes = list(row_hashes)
         _assert_replicated_across_tp(self.vectors[0], "reflection_vectors[0]")
+        # seeded-routing shares the same trigger: refresh the forced router logits
+        # for this batch's block_hash (no-op unless seeded-routing is enabled).
+        self.set_router_force(next((h for h in row_hashes if h is not None), None))
+
+    def set_router_force(self, block_hash) -> None:
+        """Refresh per-MoE-layer seeded router logits for block_hash (in place,
+        cached). No-op when seeded-routing is disabled (no router buffers)."""
+        if not self.router_force or block_hash is None \
+                or block_hash == self._last_route_hash:
+            return
+        cached = self._route_cache.get(block_hash)
+        if cached is None:
+            cached = [
+                seeded_expert_logits(f"{block_hash}_route_layer_{i}", n, k, self.device)
+                for i, (n, k) in enumerate(self.router_meta)
+            ]
+            self._route_cache[block_hash] = cached
+        for buf, val in zip(self.router_force, cached):
+            buf.copy_(val)
+        self._last_route_hash = block_hash
 
     def set_mask(self, row_mask: torch.Tensor | None) -> None:
         """Set which rows are PoC this forward (in place). None -> all chat."""
@@ -207,5 +267,27 @@ def attach_native_poc(model: nn.Module, layers: list, embed_owner, max_tokens: i
     if embed_owner is not None and hasattr(embed_owner, "embed_tokens"):
         embed_owner.embed_tokens = PoCEmbeddingWrapper(
             embed_owner.embed_tokens, state.embeds, state.mask)
+    # Seeded-routing (opt-in): wrap each MoE gate so PoC rows use deterministic
+    # seeded expert selection (removes MoE routing nondeterminism). Discovered
+    # generically (any submodule with .gate + a FusedMoE .experts) -> no per-model
+    # code. Chat rows are untouched (masked).
+    if os.environ.get("GONKA_POC_SEEDED_ROUTING") == "1":
+        for wrapper in layers:
+            inner_layer = getattr(wrapper, "inner", wrapper)
+            moe = next(
+                (m for m in inner_layer.modules()
+                 if hasattr(m, "gate") and hasattr(m, "experts")
+                 and hasattr(getattr(m, "experts"), "top_k")
+                 and not isinstance(m.gate, PoCRouterWrapper)),
+                None)
+            if moe is None:
+                continue
+            n_exp = int(moe.experts.global_num_experts)
+            top_k = int(moe.experts.top_k)
+            force = torch.full((n_exp,), -1.0e4, device=device, dtype=torch.float32)
+            state.router_force.append(force)
+            state.router_meta.append((n_exp, top_k))
+            moe.gate = PoCRouterWrapper(moe.gate, force, state.mask)
+
     model._poc_native_state = state
     return state

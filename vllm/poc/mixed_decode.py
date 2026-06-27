@@ -161,6 +161,7 @@ class PoCDecodeState:
     prev_k_t: "torch.Tensor | None" = None        # [1] int64, chained on device
     reference_t: "torch.Tensor | None" = None     # [R] int64 uploaded reference
     mismatch_t: "torch.Tensor | None" = None      # [1] int64 on-device accumulator
+    n_nan_t: "torch.Tensor | None" = None         # [1] int64 non-finite-step counter (device)
     k_steps_t: list = field(default_factory=list)  # list of [1] int64; cat+tolist at end
 
 
@@ -413,7 +414,7 @@ def process_poc_outputs_from_hidden(
     )
     from vllm.poc.data import encode_vector
     from vllm.poc.sphere import (
-        SPHERE_DIM, _SPHERE_CODEBOOK, project_to_sphere, nearest_sphere_index,
+        SPHERE_DIM, get_sphere_codebook, project_to_sphere, snap_with_guard,
     )
 
     poc_outputs = {}
@@ -421,7 +422,7 @@ def process_poc_outputs_from_hidden(
     # it every step. nearest_sphere_index casts to float, so dtype here is moot.
     codebook = getattr(runner, "_poc_codebook", None)
     if codebook is None:
-        codebook = _SPHERE_CODEBOOK.to(device=runner.device)
+        codebook = get_sphere_codebook().to(device=runner.device)
         runner._poc_codebook = codebook
 
     # Decode steps are the hot path; collect them and run ONE batched set of GPU
@@ -456,10 +457,10 @@ def process_poc_outputs_from_hidden(
             return encode_vector(yk.half().cpu().numpy())
 
         def _sphere_from_idx(sph):
-            """hidden -> sphere index, kept as a [1] int64 TENSOR (no .item(), so
-            the chain stays on the GPU and async scheduling works)."""
+            """hidden -> (sphere index, non-finite mask) as [1] int64/bool TENSORs
+            (no .item(), so the chain stays on GPU and async scheduling works)."""
             xk_sphere = project_to_sphere(torch.gather(last_hidden.unsqueeze(0), 1, sph))
-            return nearest_sphere_index(xk_sphere, codebook)  # [1] int64 tensor
+            return snap_with_guard(xk_sphere, codebook)  # (k[1] int64, bad[1] bool)
 
         if st is None:
             # Prefill-only PoC: just the vector_b64 artifact.
@@ -476,14 +477,16 @@ def process_poc_outputs_from_hidden(
         sph0 = random_pick_indices(
             poc_params.block_hash, poc_params.public_key, [nonce],
             hidden_size, SPHERE_DIM, runner.device)
-        k0_t = _sphere_from_idx(sph0)                       # [1] tensor
+        k0_t, bad0 = _sphere_from_idx(sph0)                 # [1] tensors
         st.k_steps_t = [k0_t]
         st.mismatch_t = torch.zeros(1, dtype=torch.int64, device=runner.device)
+        st.n_nan_t = bad0.to(torch.int64)                   # [1] non-finite-step counter
         if st.reference is not None:
             st.reference_t = torch.tensor(
                 st.reference, dtype=torch.int64, device=runner.device)
             ref0 = st.reference_t[0:1]
-            st.mismatch_t += (k0_t != ref0).to(torch.int64)
+            # a non-finite step is a compute fault, not a mismatch -> exclude it
+            st.mismatch_t += ((k0_t != ref0) & (k0_t >= 0)).to(torch.int64)
             st.prev_k_t = ref0                              # aligned (teacher-forced)
         else:
             st.prev_k_t = k0_t
@@ -502,17 +505,21 @@ def process_poc_outputs_from_hidden(
         steps = torch.tensor([m['decode_step'] for m in decode_metas],
                              dtype=torch.int64, device=device)
         sph = random_pick_indices_gpu(base_seeds, prev_k, steps, H, SPHERE_DIM, device)
-        k_all = nearest_sphere_index(
-            project_to_sphere(torch.gather(lh, 1, sph)), codebook)   # [B] int64
+        # snap_with_guard: argmax(NaN) is garbage -> non-finite rows return k=-1
+        # (compute fault, NOT fraud). bad_all stays on device (no per-step sync).
+        k_all, bad_all = snap_with_guard(
+            project_to_sphere(torch.gather(lh, 1, sph)), codebook)   # [B] int64, [B] bool
 
         for i, meta in enumerate(decode_metas):
             st = meta['decode_state']
             step = meta['decode_step']
             k_t = k_all[i:i + 1]                               # [1] tensor (view)
             st.k_steps_t.append(k_t)
+            st.n_nan_t += bad_all[i:i + 1].to(torch.int64)    # device accumulate (no sync)
             if st.reference_t is not None and step < st.reference_t.shape[0]:
                 ref = st.reference_t[step:step + 1]
-                st.mismatch_t += (k_t != ref).to(torch.int64)
+                # exclude a non-finite step from the mismatch count (fault != fraud)
+                st.mismatch_t += ((k_t != ref) & (k_t >= 0)).to(torch.int64)
                 st.prev_k_t = ref                             # aligned (teacher-forced)
             else:
                 st.prev_k_t = k_t
@@ -521,12 +528,20 @@ def process_poc_outputs_from_hidden(
                 # (emit-once). This single terminal PoCOutput is what the engine drains.
                 k_points = torch.cat(st.k_steps_t).tolist()
                 n_mismatches = int(st.mismatch_t.item())
+                n_nan = int(st.n_nan_t.item())
+                if n_nan:
+                    logger.warning(
+                        "PoC decode nonce %s: %d/%d non-finite hidden step(s) "
+                        "(compute fault, NOT fraud; excluded from mismatch rate) — "
+                        "trajectory suspect, re-run on a clean GPU",
+                        meta['poc_params'].nonce, n_nan, len(k_points))
                 poc_outputs[meta['req_id']] = PoCOutput(
                     nonce=meta['poc_params'].nonce,
                     vector_b64="",
                     k_points_steps=k_points,
                     n_sphere_mismatches=(
                         n_mismatches if st.reference is not None else -1),
+                    n_nan_steps=n_nan,
                 )
                 get_decode_manager(runner).free(meta['req_id'])
 

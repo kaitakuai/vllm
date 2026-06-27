@@ -385,3 +385,25 @@ def random_pick_indices_gpu(
     scores = _batched_murmur3_32(all_idx, seeds.view(-1, 1))
     _, chosen = torch.topk(-scores, k=k, largest=True, sorted=False, dim=1)
     return chosen.to(torch.int64)
+
+
+def seeded_expert_logits(seed_str: str, n_experts: int, top_k: int,
+                         device: torch.device) -> torch.Tensor:
+    """Deterministic forced router logits for SEEDED-ROUTING.
+
+    Picks top_k experts as a pure function of ``seed_str`` (bit-exact across
+    hardware via integer murmur3 — no transcendentals), then returns an
+    ``[n_experts]`` logits vector where the chosen experts hold high *descending*
+    values and the rest a low floor. Feeding this to the normal MoE top-k makes
+    BOTH the expert selection AND the gate weights a deterministic function of the
+    seed — independent of the (noise-prone) hidden — which removes the MoE routing
+    nondeterminism that drives the decode-PoC honest floor.
+    """
+    idx = torch.arange(n_experts, device=device, dtype=torch.int32).unsqueeze(0)
+    seed_t = torch.tensor([_seed_from_string(seed_str)], dtype=torch.int64,
+                          device=device).unsqueeze(1)
+    scores = _batched_murmur3_32(idx, seed_t)[0]          # [n_experts] integer hash
+    chosen = torch.topk(scores, top_k).indices            # deterministic pick
+    logits = torch.full((n_experts,), -1.0e4, device=device, dtype=torch.float32)
+    logits[chosen] = torch.arange(top_k, 0, -1, device=device, dtype=torch.float32)
+    return logits
