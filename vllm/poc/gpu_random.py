@@ -407,3 +407,44 @@ def seeded_expert_logits(seed_str: str, n_experts: int, top_k: int,
     logits = torch.full((n_experts,), -1.0e4, device=device, dtype=torch.float32)
     logits[chosen] = torch.arange(top_k, 0, -1, device=device, dtype=torch.float32)
     return logits
+
+
+def route_base_seed(block_hash: str, nonce: int, layer: int) -> str:
+    """STABLE part of the routing seed: (block_hash, nonce, layer) — everything except
+    the decode step. sha256'd ONCE per (block_hash,nonce,layer) and cached across all
+    decode steps; ``step`` is folded in on-GPU per step (see expert_logits_from_base).
+    This is the efficiency contract: NO per-step string hashing (the K-calc lesson)."""
+    return f"{block_hash}_n{nonce}_route_layer_{layer}"
+
+
+def expert_logits_from_base(base_ints: torch.Tensor, steps: torch.Tensor,
+                            n_experts: int, top_k: int,
+                            device: torch.device) -> torch.Tensor:
+    """Per-row forced router logits, folding the decode ``step`` into a cached base
+    ENTIRELY ON GPU. ``base_ints``/``steps`` are [B] int64 tensors; returns
+    [B, n_experts]. The full seed is murmur3(base, step) -> murmur3(seed, expert_idx),
+    all integer (bit-exact cross-HW), batched in two kernels — NO host loop, NO
+    device->host sync. Equivalent per (row, layer) to seeded_experts()."""
+    b = base_ints.shape[0]
+    seed = _batched_murmur3_32(steps.view(b, 1).to(torch.int32),
+                               base_ints.view(b, 1))                # [B,1] = fold step
+    idx = torch.arange(n_experts, device=device, dtype=torch.int32).unsqueeze(0).expand(b, -1)
+    scores = _batched_murmur3_32(idx, seed)                         # [B, n_experts]
+    chosen = torch.topk(scores, top_k, dim=1).indices              # [B, top_k]
+    logits = torch.full((b, n_experts), -1.0e4, device=device, dtype=torch.float32)
+    desc = torch.arange(top_k, 0, -1, device=device, dtype=torch.float32).unsqueeze(0).expand(b, -1)
+    logits.scatter_(1, chosen, desc)
+    return logits
+
+
+def seeded_experts(block_hash: str, nonce: int, step: int, layer: int,
+                   n_experts: int, top_k: int, device: torch.device) -> torch.Tensor:
+    """Reference (single-row) seeded experts = the EXACT live derivation: cached
+    sha256 base (block_hash+nonce+layer) then on-GPU ``step`` fold. Returns the chosen
+    expert indices. For tests / offline validators (the live runner uses the batched,
+    cached expert_logits_from_base, which is identical per row)."""
+    base = torch.tensor([_seed_from_string(route_base_seed(block_hash, nonce, layer))],
+                        dtype=torch.int64, device=device)
+    steps = torch.tensor([step], dtype=torch.int64, device=device)
+    logits = expert_logits_from_base(base, steps, n_experts, top_k, device)[0]
+    return torch.topk(logits, top_k).indices

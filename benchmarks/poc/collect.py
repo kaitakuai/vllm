@@ -27,6 +27,10 @@ from poc_validation import (  # noqa: E402
 
 KDIM = 12
 BH, PK = "deadbeef" * 8, "cafebabe" * 8
+try:  # frozen sphere codebook hash — the consensus reference the server asserts against
+    from vllm.poc.sphere import EXPECTED_CODEBOOK_SHA256 as CODEBOOK_HASH
+except Exception:  # pragma: no cover
+    CODEBOOK_HASH = "unknown"
 
 
 def cmd_generate(a):
@@ -39,7 +43,7 @@ def cmd_generate(a):
     nps = len(nonces) / secs if secs else 0.0
     meta = {"role": "generate", "model": a.model, "seq_len": a.seq_len,
             "max_tokens": a.max_tokens, "k_dim": KDIM, "block_hash": BH, "public_key": PK,
-            "nonces": nonces, "batch_size": 32, **a.prov}
+            "codebook_hash": CODEBOOK_HASH, "nonces": nonces, "batch_size": 32, **a.prov}
     save_run(a.save, meta, arts,
              results={"nonces_per_s": round(nps, 3), "steps_per_s": round(nps * (a.max_tokens + 1), 1),
                       "elapsed_s": round(secs, 1)})
@@ -61,11 +65,14 @@ def cmd_validate(a):
     honest = a.model == rmeta["model"]
     meta = {"role": "validate", "validator_model": a.model, "prover_model": rmeta["model"],
             "seq_len": seq, "max_tokens": mt, "k_dim": rmeta["k_dim"], "block_hash": rmeta["block_hash"],
-            "public_key": rmeta["public_key"], "nonces": nonces, "batch_size": 32, "ref": a.ref,
+            "public_key": rmeta["public_key"], "codebook_hash": rmeta.get("codebook_hash", CODEBOOK_HASH),
+            "prover_gpu": rmeta.get("gpu"),  # HW the ref was generated on (cross-HW: != this validator's gpu)
+            "nonces": nonces, "batch_size": 32, "ref": a.ref,
             "prover_engine": rmeta.get("engine"), "prover_profile": rmeta.get("profile"), **a.prov}
     save_run(a.save, meta, resp.get("artifacts", []),
              results={"validator_model": a.model, "prover_model": rmeta["model"], "honest": honest,
                       "rate": rate, "n_mismatch": resp["n_mismatch"], "fraud_detected": resp["fraud_detected"],
+                      "per_nonce": resp.get("per_nonce", []),  # per-nonce mismatch counts (for charts)
                       "prover_gpu": rmeta.get("gpu"),  # prover HW (this run is the validator's HW)
                       "nonces_per_s": round(nps, 3), "elapsed_s": round(secs, 1)})
     print(f"validate {a.model} vs ref {rmeta['model']} ({'honest' if honest else 'fraud'}): "

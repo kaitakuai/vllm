@@ -73,6 +73,7 @@ def run_validation(
       allowed fraction). No binomial; p_value carries the rate but the decision
       ignores it.
     """
+    per_nonce: List[Dict] = []   # per-nonce evidence: [{nonce, n_sphere_mismatches, n_steps}]
     if use_trajectory:
         n_mismatch = 0
         n_steps = 0
@@ -86,6 +87,7 @@ def run_validation(
                 m = 0
             n_mismatch += m
             n_steps += len(traj)
+            per_nonce.append({"nonce": a["nonce"], "n_sphere_mismatches": m, "n_steps": len(traj)})
             if m > 0:
                 mismatch_nonces.append(a["nonce"])
         rate = (n_mismatch / n_steps) if n_steps else 0.0
@@ -101,6 +103,7 @@ def run_validation(
         "n_total": n_total,
         "n_mismatch": n_mismatch,
         "mismatch_nonces": mismatch_nonces,
+        "per_nonce": per_nonce,
         "p_value": p_value,
         "fraud_detected": fraud_detected,
     }

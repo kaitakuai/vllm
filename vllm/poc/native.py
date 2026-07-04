@@ -17,7 +17,8 @@ import os
 import torch
 from torch import nn
 
-from .gpu_random import generate_householder_vector, seeded_expert_logits
+from .gpu_random import (expert_logits_from_base, generate_householder_vector,
+                         route_base_seed, _seed_from_string)
 
 # Debug-only TP guard (VLLM_POC_DEBUG_TP=1): PoC reflection vectors / embeds are
 # generated per rank from deterministic seeds and MUST be bit-identical across
@@ -148,7 +149,7 @@ class PoCRouterWrapper(nn.Module):
         logits = out[0] if isinstance(out, tuple) else out
         n = logits.shape[0]
         m = self.poc_mask[:n].unsqueeze(-1)
-        forced = self.poc_force.to(logits.dtype).unsqueeze(0).expand(n, -1)
+        forced = self.poc_force[:n].to(logits.dtype)        # per-row [n, n_experts]
         logits = torch.where(m, forced, logits)
         return (logits, *out[1:]) if isinstance(out, tuple) else logits
 
@@ -169,6 +170,7 @@ class PoCNativeState:
         self.device = device
         self.hidden_size = hidden_size
         self.num_layers = num_layers
+        self.max_tokens = max_tokens
         self.vectors = [
             torch.zeros(max_tokens, hidden_size, device=device, dtype=dtype)
             for _ in range(num_layers)
@@ -177,12 +179,15 @@ class PoCNativeState:
         self.embeds = torch.zeros(max_tokens, hidden_size, device=device, dtype=dtype)
         self._hash_cache: dict[str, list] = {}      # block_hash -> per-layer vectors
         self._last_row_hashes: list | None = None   # skip redundant per-step rescatter
-        # seeded-routing (filled by attach_native_poc when enabled): per-MoE-layer
-        # forced router-logits buffer + (n_experts, top_k); refreshed per block_hash.
-        self.router_force: list = []
+        # seeded-routing (MANDATORY for MoE; filled by attach_native_poc): per-MoE-layer
+        # PER-ROW forced router-logits buffer [max_tokens, n_experts] + (n_experts,
+        # top_k). Static shape -> cudagraph-safe; refreshed IN PLACE each step from
+        # route_seed(block_hash,nonce,step,layer) (the graph only reads it).
+        self.router_force: list = []                # per-layer [max_tokens, n_experts]
         self.router_meta: list = []                 # [(n_experts, top_k), ...]
-        self._route_cache: dict[str, list] = {}     # block_hash -> per-layer logits
-        self._last_route_hash: str | None = None
+        self._route_base: list = []                 # per-layer [max_tokens] int64 sha256 base (cached)
+        self._base_key: tuple | None = None         # (hashes,nonces) the base was built for
+        self._last_route_key: tuple | None = None   # skip refresh if (hashes,nonces,steps) unchanged
 
     def set_embeds(self, row_embeds: torch.Tensor) -> None:
         """Write the PoC rows' input embeds into the buffer (in place)."""
@@ -225,26 +230,39 @@ class PoCNativeState:
                 buf[row].copy_(vs[i].to(buf.dtype))
         self._last_row_hashes = list(row_hashes)
         _assert_replicated_across_tp(self.vectors[0], "reflection_vectors[0]")
-        # seeded-routing shares the same trigger: refresh the forced router logits
-        # for this batch's block_hash (no-op unless seeded-routing is enabled).
-        self.set_router_force(next((h for h in row_hashes if h is not None), None))
+        # (reflection vectors depend only on block_hash; routing also depends on
+        # nonce+step so it is refreshed separately, per step, via set_routing.)
 
-    def set_router_force(self, block_hash) -> None:
-        """Refresh per-MoE-layer seeded router logits for block_hash (in place,
-        cached). No-op when seeded-routing is disabled (no router buffers)."""
-        if not self.router_force or block_hash is None \
-                or block_hash == self._last_route_hash:
+    def set_routing(self, row_hashes, row_nonces, row_steps) -> None:
+        """Refresh PER-ROW seeded router logits — MANDATORY for MoE. EFFICIENT (the
+        K-calc discipline):
+          * the sha256 BASE (block_hash,nonce,layer) is hashed ONCE per mapping and
+            cached in [max_tokens] int64 buffers — NOT per step,
+          * each step only folds `step` ON GPU (expert_logits_from_base): two integer
+            murmur kernels per layer, batched [B, n_experts], copied GPU->GPU into the
+            static buffer IN PLACE.
+        So per step there is NO host string-hashing, NO device->host sync, and the
+        captured graph (which only READS the buffer) needs no recapture. Rows with
+        block_hash None get base 0 (masked out anyway)."""
+        if not self.router_force:
             return
-        cached = self._route_cache.get(block_hash)
-        if cached is None:
-            cached = [
-                seeded_expert_logits(f"{block_hash}_route_layer_{i}", n, k, self.device)
-                for i, (n, k) in enumerate(self.router_meta)
-            ]
-            self._route_cache[block_hash] = cached
-        for buf, val in zip(self.router_force, cached):
-            buf.copy_(val)
-        self._last_route_hash = block_hash
+        base_key = (tuple(row_hashes), tuple(row_nonces))
+        if base_key != self._base_key:                       # rebuild cached base (host, ONCE/mapping)
+            for i, base_buf in enumerate(self._route_base):
+                vals = [_seed_from_string(route_base_seed(bh, nz, i)) if bh is not None else 0
+                        for bh, nz in zip(row_hashes, row_nonces)]
+                base_buf[:len(vals)].copy_(
+                    torch.tensor(vals, dtype=torch.int64, device=self.device))
+            self._base_key = base_key
+        key = (base_key, tuple(row_steps))
+        if key == self._last_route_key:                      # nothing changed -> skip
+            return
+        b = len(row_steps)
+        steps_t = torch.tensor(row_steps, dtype=torch.int64, device=self.device)  # tiny [B] upload
+        for i, (buf, (n, k)) in enumerate(zip(self.router_force, self.router_meta)):
+            forced = expert_logits_from_base(self._route_base[i][:b], steps_t, n, k, self.device)
+            buf[:b].copy_(forced)                            # in place; graph reads live values
+        self._last_route_key = key
 
     def set_mask(self, row_mask: torch.Tensor | None) -> None:
         """Set which rows are PoC this forward (in place). None -> all chat."""
@@ -267,27 +285,33 @@ def attach_native_poc(model: nn.Module, layers: list, embed_owner, max_tokens: i
     if embed_owner is not None and hasattr(embed_owner, "embed_tokens"):
         embed_owner.embed_tokens = PoCEmbeddingWrapper(
             embed_owner.embed_tokens, state.embeds, state.mask)
-    # Seeded-routing (opt-in): wrap each MoE gate so PoC rows use deterministic
-    # seeded expert selection (removes MoE routing nondeterminism). Discovered
-    # generically (any submodule with .gate + a FusedMoE .experts) -> no per-model
-    # code. Chat rows are untouched (masked).
-    if os.environ.get("GONKA_POC_SEEDED_ROUTING") == "1":
-        for wrapper in layers:
-            inner_layer = getattr(wrapper, "inner", wrapper)
-            moe = next(
-                (m for m in inner_layer.modules()
-                 if hasattr(m, "gate") and hasattr(m, "experts")
-                 and hasattr(getattr(m, "experts"), "top_k")
-                 and not isinstance(m.gate, PoCRouterWrapper)),
-                None)
-            if moe is None:
-                continue
-            n_exp = int(moe.experts.global_num_experts)
-            top_k = int(moe.experts.top_k)
-            force = torch.full((n_exp,), -1.0e4, device=device, dtype=torch.float32)
-            state.router_force.append(force)
-            state.router_meta.append((n_exp, top_k))
-            moe.gate = PoCRouterWrapper(moe.gate, force, state.mask)
+    # Seeded-routing is MANDATORY for MoE — part of the PoC algorithm, not a toggle.
+    # Natural MoE top-k reads the noise-prone hidden, so cross-HW/backend drift flips
+    # the k-th expert and inflates the honest floor; seeding the experts from
+    # (block_hash,nonce,step,layer) removes that. There is NO non-seeded path. Wrap
+    # every MoE gate, discovered generically (any submodule with .gate + a FusedMoE
+    # .experts) -> no per-model code. Chat rows are masked out (natural router kept).
+    for wrapper in layers:
+        inner_layer = getattr(wrapper, "inner", wrapper)
+        moe = next(
+            (m for m in inner_layer.modules()
+             if hasattr(m, "gate") and hasattr(m, "experts")
+             and hasattr(getattr(m, "experts"), "top_k")
+             and not isinstance(m.gate, PoCRouterWrapper)),
+            None)
+        if moe is None:
+            continue
+        n_exp = int(moe.experts.global_num_experts)
+        top_k = int(moe.experts.top_k)
+        # PER-ROW static buffer [max_tokens, n_experts] -> cudagraph-safe, refreshed
+        # in place each step by set_routing (batched, one GPU call per layer).
+        force = torch.full((state.max_tokens, n_exp), -1.0e4,
+                           device=device, dtype=torch.float32)
+        state.router_force.append(force)
+        state._route_base.append(
+            torch.zeros(state.max_tokens, dtype=torch.int64, device=device))
+        state.router_meta.append((n_exp, top_k))
+        moe.gate = PoCRouterWrapper(moe.gate, force, state.mask)
 
     model._poc_native_state = state
     return state

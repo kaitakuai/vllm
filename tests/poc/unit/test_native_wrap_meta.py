@@ -1,10 +1,10 @@
 """Weightless graph-instrumentation check for PoC.
 
-`attach_native_poc` must wrap EVERY decoder layer of each in-scope model so the
+`attach_native_poc` must wrap EVERY decoder layer of each supported model so the
 Householder reflection rides vLLM's native graph. This test verifies that on the
 **meta device** — no weights, no GPU, no memory, only the model's config — so we can
-validate PoC instrumentation for models that don't fit locally (235B, MiniMax-M2,
-MiniMax-Text-01/M1, Kimi) BEFORE renting hardware.
+validate PoC instrumentation for large models that don't fit locally BEFORE renting
+hardware.
 
 It catches, weightlessly:
   * vLLM doesn't have the architecture (can't instrument what it can't build),
@@ -20,16 +20,15 @@ import torch
 
 from vllm.poc.native import PoCLayerWrapper, attach_native_poc
 
-# In-scope decode-PoC targets (SoW: MiniMax-M2.7, Kimi-K2.6) + a dense baseline.
-# Locally (Ada/CPU) MiniMax + qwen3 build weightlessly on meta and are checked here.
-# Kimi-K2.6 -> DeepseekV3 (MLA, head_size 576): it has NO MLA backend on Ada AND its
-# init isn't meta-clean, so it SKIPS locally and is validated on its scoped MLA-capable
-# box (A100/H200/B200). The skip-on-exception keeps the suite green either way.
-SCOPE_MODELS = [
+# Representative large-model architectures for weightless PoC-instrumentation checks.
+# Small/dense configs build on meta and are checked locally; MLA models (head_size 576)
+# have no MLA backend on Ada and their init isn't meta-clean, so they SKIP locally and
+# are validated on an MLA-capable GPU. The skip-on-exception keeps the suite green either way.
+META_MODELS = [
     "Qwen/Qwen3-0.6B",              # dense baseline (cheap, usually cached)
-    "MiniMaxAI/MiniMax-M2",         # scope MiniMax-M2.7 arch: hybrid lightning+full attn, MoE
+    "MiniMaxAI/MiniMax-M2",         # hybrid lightning + full attention, MoE
     "MiniMaxAI/MiniMax-Text-01",    # lightning attention + MoE (extra coverage)
-    "moonshotai/Kimi-K2.6",        # scope: DeepseekV3/MLA — runs on A100/H200/B200, skips on Ada
+    "moonshotai/Kimi-K2.6",        # DeepSeek-V3 / MLA — validated on an MLA-capable GPU, skips on Ada
 ]
 
 
@@ -47,7 +46,7 @@ def _ensure_distributed():
     initialize_model_parallel(1, 1)
 
 
-@pytest.mark.parametrize("model_id", SCOPE_MODELS)
+@pytest.mark.parametrize("model_id", META_MODELS)
 def test_attach_native_poc_wraps_all_decoder_layers_on_meta(model_id):
     from vllm.engine.arg_utils import EngineArgs
     from vllm.config import set_current_vllm_config
@@ -93,7 +92,7 @@ import contextlib
 def _force_mla_backend_for_build():
     """TEST-ONLY: force the MLA attention backend (TritonMLA) during model CONSTRUCTION.
 
-    MLA models (DeepSeek-V3 / Kimi-K2.6) can't build on `meta` (init isn't meta-clean),
+    MLA models (DeepSeek-V3-style) can't build on `meta` (init isn't meta-clean),
     and on non-MLA GPUs (e.g. Ada) the selector rejects them (it's invoked with
     dtype=float32 → no MLA backend qualifies). We only WRAP layers here — attention is
     never executed — so we just need construction to succeed. This pins the MLA backend
@@ -122,16 +121,16 @@ def _force_mla_backend_for_build():
 # MLA backend pin above. NOTE: `load_format="dummy"` ALLOCATES the parameter tensors, and
 # shrinking layers does NOT shrink embedding/lm_head/hidden-width — which dominate. So we
 # use DeepSeek-V2-Lite (vocab 102k × hidden 2048 ≈ 0.8 GB, fits any GPU) as the proxy for
-# the same deepseek_v2.py / MLA wrap path. The scoped Kimi-K2.6 (vocab 164k × hidden 7168
-# ≈ 4.7 GB just embed+lm_head, even at 2 layers) OOMs small GPUs → it's validated on its
-# scoped A100/H200/B200 box, not here. (model_id, hf_overrides)
-MLA_SCOPE_MODELS = [
+# the same deepseek_v2.py / MLA wrap path. A large MLA model (vocab ~164k × hidden 7168
+# ≈ 4.7 GB just embed+lm_head, even at 2 layers) OOMs small GPUs → it's validated on an
+# MLA-capable GPU, not here. (model_id, hf_overrides)
+MLA_META_MODELS = [
     ("deepseek-ai/DeepSeek-V2-Lite", {"num_hidden_layers": 2}),
 ]
 
 
 @pytest.mark.gpu
-@pytest.mark.parametrize("model_id,overrides", MLA_SCOPE_MODELS)
+@pytest.mark.parametrize("model_id,overrides", MLA_META_MODELS)
 def test_attach_native_poc_wraps_mla_layers_on_gpu(model_id, overrides):
     import torch as _t
     if not _t.cuda.is_available():

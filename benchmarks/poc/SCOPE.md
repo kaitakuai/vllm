@@ -6,7 +6,7 @@ result is in [README.md](README.md).
 
 ## The problem
 In a decentralized inference network, GPU providers are paid to serve a specific large
-model (say, Qwen3-235B). Nothing physically stops a dishonest provider from quietly
+model (say, a 200B+ MoE). Nothing physically stops a dishonest provider from quietly
 running a smaller, cheaper model instead and keeping the difference. So the network
 needs a cheap, automatic way to check that a provider really ran **the assigned model
 on real hardware** — a *Proof-of-Compute (PoC)*.
@@ -138,20 +138,11 @@ noise ⇒ co-existence holds.
   chain consumes `fraud_detected` → `validated_weight`.
 
 ## What we vary (scope)
-The separation and performance results are produced across this coverage target:
-
-| Model | Config |
-|---|---|
-| Qwen/Qwen3-235B-A22B-Instruct-2507-FP8 | `node-config-qwen235B-B200.json` |
-| Qwen/Qwen3-235B-A22B-Instruct-2507-FP8 | `node-config.json` |
-| moonshotai/Kimi-K2.6 | `node-config-kimik26-B200.json` |
-| moonshotai/Kimi-K2.6 | `node-config-kimik26-H200.json` |
-| MiniMaxAI/MiniMax-M2.7 | `node-config-minimax-A100.json` |
-| MiniMaxAI/MiniMax-M2.7 | `node-config-minimax-H100.json` |
-| MiniMaxAI/MiniMax-M2.7 | `node-config-minimax-H200.json` |
-| MiniMaxAI/MiniMax-M2.7 | `node-config-minimax-B200.json` |
-
-**Hardware:** A100 · H100 · H200 · B200
+The separation and performance results are produced across a set of large models and
+GPU configurations under test. **Model, hardware, tensor-parallel size,
+attention backend and all other serve settings are runtime parameters** (passed per run
+and recorded into the result file) — nothing model- or deployment-specific is hardcoded
+in the tooling.
 
 Beyond model and hardware, each run is one combination of these axes (the tooling
 selects them per run and records the effective values into the result file):
@@ -167,7 +158,7 @@ selects them per run and records the effective values into the result file):
 | Shape | seq_len, max_tokens, nonces | `--seq-len` / `--max-tokens` / `--nonces` |
 | dtype / quant | model-defined | recorded from the vLLM log |
 
-The matrix is the **coverage target, not a tooling limit**: any combination of the axes
+The set under test is **not a tooling limit**: any combination of the axes
 above runs through the same `--profile` / `--url` / shape flags with no code change, and
 `analyze.py` compares across all of them offline via per-file provenance.
 

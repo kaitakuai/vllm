@@ -2,7 +2,7 @@
 # Run quality_gsm8k.py (gsm8k generation under parallel PoC) across a
 # batch_size × poc_requests × max_tokens matrix, baseline-first.
 #
-# This is the SOW "inference co-existence" check: does real generation quality
+# This is the "inference co-existence" check: does real generation quality
 # (gsm8k) hold while DECODE PoC runs in parallel?
 #
 # Order of runs:

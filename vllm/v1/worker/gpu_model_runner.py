@@ -4168,14 +4168,25 @@ class GPUModelRunner(
                         # Per-row block_hash: each PoC request's rows reflect with
                         # ITS OWN block's vectors, so different-block_hash requests
                         # can share one forward without contaminating each other.
-                        row_hashes = [None] * unified_embeds.shape[0]
+                        n_rows = unified_embeds.shape[0]
+                        row_hashes = [None] * n_rows
+                        row_nonces = [0] * n_rows           # per-row nonce + step for
+                        row_steps = [0] * n_rows            # MANDATORY seeded-routing
                         for meta in poc_metadata:
                             bh = meta['poc_params'].block_hash
+                            nz = meta['poc_params'].nonce
+                            stp = meta.get('decode_step', 0)
                             s = meta['start_idx']
                             for r in range(s, s + meta['length']):
-                                if r < len(row_hashes):
+                                if r < n_rows:
                                     row_hashes[r] = bh
+                                    row_nonces[r] = nz
+                                    row_steps[r] = stp
                         self._poc_native.set_row_block_hashes(row_hashes)
+                        # Seeded routing (mandatory for MoE): refresh per-row forced
+                        # experts from (block_hash,nonce,step,layer). Cached base +
+                        # on-GPU step fold -> cudagraph-safe, no per-step host sync.
+                        self._poc_native.set_routing(row_hashes, row_nonces, row_steps)
                     self._mixed_batch_info['poc_metadata'] = poc_metadata
                     self._mixed_batch_info['poc_position_mask'] = poc_position_mask
 
