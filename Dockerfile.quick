@@ -6,16 +6,21 @@ FROM ${BASE_IMAGE}
 
 # Kaitakuai sampler-stack residual overlay on top of upstream vLLM 0.23.0.
 #
-# Six commits on this branch (poc-sampler-residual-v0.23) touch only Python
-# files inside the vllm/ package; no CUDA / .so rebuild is required. We
+# The residual commits on this branch (poc-sampler-residual-v0.23) touch only
+# Python files inside the vllm/ package; no CUDA / .so rebuild is required. We
 # therefore overlay the modified .py files on top of the pre-built image
 # instead of recompiling from source. This mirrors the Stage-1 pattern used
 # by mb/feat/port-pocv2-vllm-0.23.0 (Dockerfile.quick) — see that branch
 # for the original rationale.
 #
-# Files touched by the residual stack (8 total; reproduce with
-#   `git diff --name-only <upstream-base>..HEAD -- 'vllm/*.py'`):
+# Files touched by the residual stack (14 total; reproduce with
+#   `git diff --name-only v0.23.0..HEAD -- 'vllm/**/*.py' 'vllm/*.py'`):
+#   vllm/distributed/parallel_state.py
+#   vllm/entrypoints/openai/chat_completion/protocol.py
+#   vllm/entrypoints/openai/chat_completion/serving.py
+#   vllm/entrypoints/openai/engine/serving.py
 #   vllm/sampling_params.py
+#   vllm/v1/executor/multiproc_executor.py
 #   vllm/v1/sample/metadata.py
 #   vllm/v1/sample/sampler.py
 #   vllm/v1/sample/ops/topk_topp_sampler.py
@@ -23,6 +28,7 @@ FROM ${BASE_IMAGE}
 #   vllm/v1/structured_output/backend_xgrammar.py
 #   vllm/v1/worker/gpu_input_batch.py
 #   vllm/v1/worker/gpu_model_runner.py
+#   vllm/validation.py
 #
 # We do not enumerate them in COPY directives; we use the find/tar pattern
 # from Stage 1 so adding a new file under vllm/ on this branch picks up
