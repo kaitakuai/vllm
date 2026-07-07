@@ -62,6 +62,18 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Free disk space
+        # The vllm wheel + torch/CUDA deps no longer fit the stock runner
+        # (ENOSPC on 2026-07-07 run); same mitigation as build-sampler-residual.
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -77,7 +89,7 @@ jobs:
           # .py files OVER the installed vllm location. Contract tests are
           # pure read-only inspect — overlay is sufficient, no rebuild.
           pip install --upgrade pip
-          pip install vllm==0.23.0 pytest
+          pip install --no-cache-dir vllm==0.23.0 pytest
           # CWD = repo checkout which contains a vllm/ source dir; Python
           # would import THAT instead of the installed wheel. Resolve the
           # install location via pip metadata, NOT via `python -c "import
@@ -169,6 +181,16 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@v1.3.1
+        with:
+          tool-cache: true
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          docker-images: false
+
       - name: Set up Python 3.11
         uses: actions/setup-python@v5
         with:
@@ -180,7 +202,7 @@ jobs:
           # Use the latest stable upstream wheel — NOT our fork. The
           # patch-added fields will be missing; that is the signal.
           pip install --upgrade pip
-          pip install vllm
+          pip install --no-cache-dir vllm
           pip install pytest
 
       - name: Stage contract tests outside the working tree
