@@ -4,7 +4,8 @@ This is a permanent thin fork of `vllm-project/vllm`, owned by Kaitaku.
 ADR-0014 in `mlnode-foundry/docs/adr/0014-residual-fork-permanent-infra.md`
 treats this branch as permanent infrastructure (the Layer 3 upstream pathway
 is deferred without timeline). Each new vLLM minor is rebased mechanically
-by cherry-picking the same commit stack (6 sampler + 1 request-ingestion) onto the upstream tag.
+by cherry-picking the same commit stack (6 sampler + 1 request-ingestion +
+1 runtime-stability) onto the upstream tag.
 
 ## When upstream cuts `vM.N`
 
@@ -21,8 +22,9 @@ by cherry-picking the same commit stack (6 sampler + 1 request-ingestion) onto t
    git checkout -b poc-sampler-residual-vM.N vM.N
    ```
 
-3. Cherry-pick the 7 SHAs (6 sampler + row 7 request-ingestion) in chronological
-   order from the most-recent residual branch (`poc-sampler-residual-v<prev>`):
+3. Cherry-pick the 8 SHAs (6 sampler + row 7 request-ingestion + row 8
+   runtime-stability) in chronological order from the most-recent residual
+   branch (`poc-sampler-residual-v<prev>`):
 
    | # | SHA on v0.23 branch | Subject |
    |---|---------------------|---------|
@@ -33,6 +35,7 @@ by cherry-picking the same commit stack (6 sampler + 1 request-ingestion) onto t
    | 5 | `4996d5af7` | feat(structured-output): graceful degradation on grammar token rejection |
    | 6 | `8d4e322e0` | fix(sampler): thread `need_processed_logprobs` through `forward_xpu` |
    | 7 | `93394aced` | feat(validation): add enforced_tokens request ingestion (HTTP -> SamplingParams) |
+   | 8 | `af4eef309` | fix(distributed): enlarge shm MessageQueue rings max_chunks -> 64 |
 
    Rows 1-6 are the **sampler stack** (private `vllm.v1.*` surfaces). Row 7 is the
    **request-ingestion layer** added 2026-06-25: `vllm/validation.py`
@@ -46,8 +49,16 @@ by cherry-picking the same commit stack (6 sampler + 1 request-ingestion) onto t
    (`vllm/entrypoints/openai/**`), which churns faster upstream than the sampler
    internals — expect its hunks to be the most rebase-conflict-prone.
 
+   Row 8 is the **runtime-stability fix** added 2026-07-07, ported from the
+   0.20 fat-fork (kaitakuai/vllm#15, upstreaming as gonka-ai/vllm#58): enlarge
+   the shm MessageQueue rings (`vllm/distributed/parallel_state.py` 3×6→64,
+   `vllm/v1/executor/multiproc_executor.py` rpc ring 10→64) so a briefly-slow
+   TP reader cannot starve the writer into an engine stall. Surfaces pinned by
+   `tests/contract/test_mq_ring_surface.py`. Prophylactic on 0.23 — the stalls
+   were observed in 0.20 production (B300 Kimi); kept to preserve lineage parity.
+
    ```bash
-   git cherry-pick 1c5368212 3176a941c c2db96992 f2bbeaac8 4996d5af7 8d4e322e0 93394aced
+   git cherry-pick 1c5368212 3176a941c c2db96992 f2bbeaac8 4996d5af7 8d4e322e0 93394aced af4eef309
    ```
 
    > **TODO (future rebase):** these SHAs are the commit IDs on
@@ -65,6 +76,7 @@ by cherry-picking the same commit stack (6 sampler + 1 request-ingestion) onto t
    > git log --oneline --grep='feat(structured-output): graceful degradation' poc-sampler-residual-v<prev>
    > git log --oneline --grep='fix(sampler): thread need_processed_logprobs through forward_xpu' poc-sampler-residual-v<prev>
    > git log --oneline --grep='feat(validation): add enforced_tokens request ingestion' poc-sampler-residual-v<prev>
+   > git log --oneline --grep='fix(distributed): enlarge shm MessageQueue rings' poc-sampler-residual-v<prev>
    > ```
 
 4. Update `setup.py` `get_vllm_version()` to bump the local-version
@@ -118,7 +130,7 @@ by cherry-picking the same commit stack (6 sampler + 1 request-ingestion) onto t
 
 ## What if a cherry-pick conflicts
 
-The 6 commits touch only narrow surfaces:
+The commits touch only narrow surfaces:
 
 * `vllm/sampling_params.py` — pure additions to a dataclass
 * `vllm/v1/sample/metadata.py` — pure additions to a dataclass
@@ -126,6 +138,8 @@ The 6 commits touch only narrow surfaces:
 * `vllm/v1/sample/ops/topk_topp_sampler.py` — `forward_*` kwarg threading
 * `vllm/v1/worker/gpu_input_batch.py` — new dict attrs + property
 * `vllm/v1/structured_output/__init__.py` + `backend_xgrammar.py` — assert → warn
+* `vllm/distributed/parallel_state.py` — ring-size constants at 3 call sites (row 8)
+* `vllm/v1/executor/multiproc_executor.py` — one ctor kwarg (row 8)
 
 ### Rule 1: keep both adjacent additions
 
