@@ -68,8 +68,8 @@ def test_cross_hw_detected_and_labelled(tmp_path):
     # cross-HW rows carry the prover GPU; same-HW ones don't get the xHW tag
     assert "xHW⇐" in html
     assert "H100" in html                # the prover HW is surfaced in the label
-    # separation table still lists the plain same-HW pairs
-    assert "honest floor" in html and "FRAUD" in html
+    # separation table lists producers with the producer/validator terminology
+    assert "honest producer" in html and "fraud producer" in html
 
 
 def test_per_nonce_charts_present(tmp_path):

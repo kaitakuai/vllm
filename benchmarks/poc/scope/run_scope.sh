@@ -84,10 +84,19 @@ kv_preflight(){ # read vLLM's logged KV size; warn (don't waste a run) if the Po
     echo "  └───────────────────────────────────────────────────────────"
   fi
 }
-kill_srv(){ # kill ONLY my server's process group (safe on shared GPU), wait for VRAM to free
+kill_srv(){ # kill ONLY my server's process group (safe on shared GPU), then WAIT for VRAM to actually
+  # free — vLLM multiproc workers release CUDA memory AFTER the process exits, so the next boot OOMs
+  # on a tight gpu-mem (e.g. MiniMax @0.90) unless we poll until it's really free.
+  # vLLM v1 boots via `setsid` (new session) so `kill -- -$PID` (our subshell's group) MISSES the
+  # detached python + its GPU workers. Reap by GPU PID until VRAM is actually free (dedicated box).
   [ -n "$SRV_PID" ] && kill -- "-$SRV_PID" 2>/dev/null
-  for i in $(seq 1 30); do ps -p "${SRV_PID:-0}" >/dev/null 2>&1 || break; sleep 1; done
-  SRV_PID=""; sleep 3
+  for i in $(seq 1 25); do
+    u=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1)
+    [ "${u:-99999}" -lt 3000 ] && break
+    nvidia-smi --query-compute-apps=pid --format=csv,noheader 2>/dev/null | xargs -r kill -9 2>/dev/null
+    sleep 2
+  done
+  SRV_PID=""
 }
 stamp(){ # post-stamp meta.attention_backend/cudagraph_mode/profile from the profile name
   local f="$1" prof="$2"; [ -f "$f" ] || return 0
