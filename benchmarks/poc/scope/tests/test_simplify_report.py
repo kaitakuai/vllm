@@ -35,23 +35,26 @@ def _write_session(d):
     N = 8
     files = {
         # same-HW pairs (prover_gpu == validator gpu)
-        "val_cg-flashattn__gen_honest_cg-flashattn.json": _val(True, 0.5, [0, 1, 0, 2, 1, 0, 1, 0], VAL_GPU),
-        "val_cg-flashattn__gen_fraud_cg-flashattn.json": _val(False, 30.0, [40, 45, 42, 44, 41, 43, 46, 40], VAL_GPU),
+        "val_cg-flashattn__gen_honest_cg-flashattn.json": _val(True, 0.005, [0, 1, 0, 2, 1, 0, 1, 0], VAL_GPU),
+        "val_cg-flashattn__gen_fraud_cg-flashattn.json": _val(False, 0.30, [40, 45, 42, 44, 41, 43, 46, 40], VAL_GPU),
         # CROSS-HW pairs (prover on a different GPU)
-        "val_cg-flashattn__xhw_honest_cg-flashattn.json": _val(True, 1.2, [1, 2, 1, 3, 2, 1, 2, 1], PROVER_GPU_XHW),
-        "val_cg-flashattn__xhw_fraud_cg-flashattn.json": _val(False, 31.0, [41, 44, 43, 45, 42, 44, 47, 41], PROVER_GPU_XHW),
+        "val_cg-flashattn__xhw_honest_cg-flashattn.json": _val(True, 0.012, [1, 2, 1, 3, 2, 1, 2, 1], PROVER_GPU_XHW),
+        "val_cg-flashattn__xhw_fraud_cg-flashattn.json": _val(False, 0.31, [41, 44, 43, 45, 42, 44, 47, 41], PROVER_GPU_XHW),
+        # GSM8K co-existence: on/off delta = 1pt (within the default ~2.5pt tolerance)
+        "gsm_cg-flashattn_on.json": {"flexible_extract": 0.60},
+        "gsm_cg-flashattn_off.json": {"flexible_extract": 0.59},
     }
     for name, obj in files.items():
         json.dump(obj, open(os.path.join(d, name), "w"))
     return N
 
 
-def _render(tmp):
+def _render(tmp, args=()):
     d = os.path.join(tmp, "sess")
     _write_session(d)
     out = os.path.join(d, "report.html")
     env = {**os.environ, "POC_SCOPE_COMMIT": "testcommit"}
-    subprocess.run([sys.executable, SIMPLIFY, d, "--out", out], check=True, env=env)
+    subprocess.run([sys.executable, SIMPLIFY, d, "--out", out, *args], check=True, env=env)
     return open(out, encoding="utf-8").read()
 
 
@@ -77,6 +80,33 @@ def test_per_nonce_charts_present(tmp_path):
     # >=2 charts (same-HW config + cross-HW config), dots = nonces*pairs
     assert html.count("<svg") >= 2
     assert html.count("<circle") >= 8 * 2   # at least the honest+fraud nonces of one config
+
+
+def test_production_verdict_default_passes(tmp_path):
+    # fixture: honest ~1% < p_mismatch(10%) < fraud ~30% -> production PASS, no misses flagged
+    html = _render(str(tmp_path))
+    assert "p_mismatch = 10.0%" in html
+    assert "MISSED" not in html and "false-pos" not in html
+
+
+def test_production_verdict_fraud_missed(tmp_path):
+    # raise threshold above the fraud rate (40%) -> fraud sits BELOW p_mismatch -> MISSED -> REVIEW
+    html = _render(str(tmp_path), ["--p-mismatch", "0.4"])
+    assert "fraud ✗ MISSED" in html
+    assert "NEEDS REVIEW" in html
+
+
+def test_production_verdict_honest_false_positive(tmp_path):
+    # drop threshold below the honest rate (0.1%) -> honest ABOVE p_mismatch -> false-positive -> REVIEW
+    html = _render(str(tmp_path), ["--p-mismatch", "0.001"])
+    assert "honest ✗ false-pos" in html
+    assert "NEEDS REVIEW" in html
+
+
+def test_gsm_tolerance_configurable(tmp_path):
+    # on/off delta = 1pt: within the default ~2.5pt tolerance, but flagged when tightened
+    assert "differs" not in _render(str(tmp_path))                      # default
+    assert "differs" in _render(str(tmp_path), ["--gsm-tol", "0.005"])  # 0.5pt tol flags the 1pt delta
 
 
 if __name__ == "__main__":  # allow plain `python test_simplify_report.py`

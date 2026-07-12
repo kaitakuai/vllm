@@ -35,8 +35,14 @@ tr.hi td{background:#fef9c3}.good-t{color:var(--green);font-weight:700}.bad-t{co
 
 ap = argparse.ArgumentParser()
 ap.add_argument("session"); ap.add_argument("--out", default=None)
+ap.add_argument("--p-mismatch", type=float, default=0.1,
+                help="production acceptance threshold (fraction): fraud must exceed it and honest stay below it (default 0.1)")
+ap.add_argument("--gsm-tol", type=float, default=0.0251,
+                help="GSM8K co-existence tolerance (fraction; on/off delta within it = sampling noise; default ~2.5pt)")
 a = ap.parse_args()
 D = a.session.rstrip("/"); OUT = a.out or f"{D}/report_simple.html"
+P_MISMATCH = a.p_mismatch * 100.0   # percent, to match the mismatch-rate scale
+GSM_TOL = a.gsm_tol
 L = lambda f: json.load(open(f))
 def res(d): r = d.get("results", d); return r[0] if isinstance(r, list) and r else r
 
@@ -125,7 +131,10 @@ if vals:
     validator_cfg = f"{v_eng} · {v_bk}"
     rows = ""
     for lab, rate, honest, _pn, _pr in vals:
-        cls = "good-t" if honest else "bad-t"; vd = "honest ✓" if honest else "fraud ✓"
+        cls = "good-t" if honest else "bad-t"
+        ok = (rate < P_MISMATCH) if honest else (rate > P_MISMATCH)   # production acceptance at p_mismatch
+        vd = ("honest ✓" if ok else "honest ✗ false-pos") if honest else ("fraud ✓" if ok else "fraud ✗ MISSED")
+        vdcls = cls if ok else "bad-t"
         hi = " class=hi" if not honest else ""
         g, b = _cfg(_pr)
         prod = f"<b class={cls}>{'honest' if honest else 'fraud'}</b> · {g} · {b}"
@@ -141,10 +150,12 @@ if vals:
         base = "honest" if honest else "fraud"
         what = (f"{base} · " + " · ".join(diffs)) if diffs else (f"{base} · floor (same config)" if honest else f"{base} detection")
         rows += (f"<tr{hi}><td>{prod}{note}</td><td>{validator_cfg}</td><td class={cls}>{what}</td>"
-                 f"<td class=num>{rate:.2f}%</td><td class={cls}>{vd}</td></tr>")
-    passed = (thr and hmax < thr < fmin)
-    vtxt = (f"honest ≤ <b>{hmax:.2f}%</b>, fraud ≥ <b>{fmin:.2f}%</b>; threshold <b>p_mismatch ≈ {thr:.2f}%</b> separates cleanly." if passed
-            else f"honest ≤ {hmax:.2f}%, fraud ≥ {fmin:.2f}% — margin tight; review threshold.")
+                 f"<td class=num>{rate:.2f}%</td><td class={vdcls}>{vd}</td></tr>")
+    # acceptance = the PRODUCTION fixed threshold p_mismatch (all honest below it, all fraud above it).
+    passed = (not hon or hmax < P_MISMATCH) and (not fr or fmin > P_MISMATCH)
+    _adapt = f" · adaptive gap √(honest_max·fraud_min) ≈ {thr:.2f}%" if thr else ""
+    vtxt = (f"At production <b>p_mismatch = {P_MISMATCH:.1f}%</b>: honest ≤ <b>{hmax:.2f}%</b>, fraud ≥ <b>{fmin:.2f}%</b> — every honest pair below and every fraud pair above → fraud caught.{_adapt}" if passed
+            else f"At production <b>p_mismatch = {P_MISMATCH:.1f}%</b>: honest ≤ {hmax:.2f}%, fraud ≥ {fmin:.2f}% — a pair crosses the line (honest &gt; p_mismatch → false-positive, or fraud &lt; p_mismatch → MISSED).{_adapt}")
     cards.append(f"""<div class=card><div class=exp>Experiment 2</div>
  <h2>Separation — honest vs fraud (anti-cheat)</h2>
  <p class=lead>A <b>producer</b> generates a trajectory; the <b>validator</b> (the honest model) re-runs it teacher-forced and counts mismatches. An <span class=good-t>honest producer</span> (real model) matches the validator → low %; a <span class=bad-t>fraud producer</span> (cheaper model) diverges → high %.</p>
@@ -226,7 +237,7 @@ def gsm(s):
     except Exception: return None
 on, off = gsm("on"), gsm("off")
 if on is not None and off is not None:
-    same = abs(on-off) <= 0.0251      # ~2.5pt = sampling noise on 100 q (fp-safe)
+    same = abs(on-off) <= GSM_TOL      # tolerance (default ~2.5pt = sampling noise on 100 q); --gsm-tol
     cards.append(f"""<div class=card><div class=exp>Experiment 3</div>
  <h2>Co-existence — GSM8K under PoC load</h2>
  <p class=lead>GSM8K accuracy <b>with</b> a concurrent PoC load vs <b>without</b>.</p>
