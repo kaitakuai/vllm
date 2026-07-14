@@ -286,6 +286,7 @@ def request_generate(
     fraud_threshold: float = 0.01,
     wait: bool = True,
     timeout: int = 900,
+    debug: bool = False,
 ):
     """The one v2 /generate request builder. Returns (response_json, elapsed_sec).
 
@@ -293,6 +294,8 @@ def request_generate(
     - raw validation:     pass enforced_k -> artifacts carry n_sphere_mismatches.
     - verdict validation: pass enforced_k + validation -> run_validation runs and
       returns fraud_detected. max_tokens>0 selects the decode trajectory metric.
+    - debug=True: artifacts additionally carry the per-step pre-snap sphere slices
+      (sph_values_steps) — needed for the vector-channel score / offline analysis.
     """
     payload: Dict[str, Any] = {
         "block_hash": block_hash, "block_height": 100, "public_key": public_key,
@@ -300,6 +303,8 @@ def request_generate(
         "params": {"model": model, "seq_len": seq_len, "k_dim": k_dim, "max_tokens": max_tokens},
         "batch_size": batch_size, "wait": wait,
     }
+    if debug:
+        payload["debug"] = True
     if enforced_k is not None:
         payload["enforced_k_steps"] = enforced_k
     if validation is not None:

@@ -38,7 +38,7 @@ def cmd_generate(a):
     with deploy_from_args(a, a.model) as (url, srv):
         resp, secs = request_generate(url, target=a.target, model=a.model, nonces=nonces,
                                       block_hash=BH, public_key=PK, seq_len=a.seq_len,
-                                      max_tokens=a.max_tokens, k_dim=KDIM)
+                                      max_tokens=a.max_tokens, k_dim=KDIM, debug=a.debug)
     arts = resp["artifacts"]
     nps = len(nonces) / secs if secs else 0.0
     meta = {"role": "generate", "model": a.model, "seq_len": a.seq_len,
@@ -59,10 +59,12 @@ def cmd_validate(a):
         resp, secs = request_generate(url, target=a.target, model=a.model, nonces=nonces,
                                       block_hash=rmeta["block_hash"], public_key=rmeta["public_key"],
                                       seq_len=seq, max_tokens=mt, k_dim=rmeta["k_dim"],
-                                      enforced_k=enforced, validation=ref_arts, p_mismatch=a.p_mismatch)
+                                      enforced_k=enforced, validation=ref_arts,
+                                      p_mismatch=a.p_mismatch, debug=a.debug)
     rate = resp["n_mismatch"] / (len(nonces) * (mt + 1))
     nps = len(nonces) / secs if secs else 0.0
     honest = a.model == rmeta["model"]
+    vec = resp.get("vector_score")  # present when ref was generated with --debug too
     meta = {"role": "validate", "validator_model": a.model, "prover_model": rmeta["model"],
             "seq_len": seq, "max_tokens": mt, "k_dim": rmeta["k_dim"], "block_hash": rmeta["block_hash"],
             "public_key": rmeta["public_key"], "codebook_hash": rmeta.get("codebook_hash", CODEBOOK_HASH),
@@ -73,10 +75,12 @@ def cmd_validate(a):
              results={"validator_model": a.model, "prover_model": rmeta["model"], "honest": honest,
                       "rate": rate, "n_mismatch": resp["n_mismatch"], "fraud_detected": resp["fraud_detected"],
                       "per_nonce": resp.get("per_nonce", []),  # per-nonce mismatch counts (for charts)
+                      "vector_score": vec,  # continuous channel (needs --debug both sides)
                       "prover_gpu": rmeta.get("gpu"),  # prover HW (this run is the validator's HW)
                       "nonces_per_s": round(nps, 3), "elapsed_s": round(secs, 1)})
+    vtxt = f" vec_mean_dist={vec['mean_dist']:.2e}" if vec else ""
     print(f"validate {a.model} vs ref {rmeta['model']} ({'honest' if honest else 'fraud'}): "
-          f"rate={rate*100:.3f}% fraud={resp['fraud_detected']} {nps:.2f} nonces/s -> {a.save}")
+          f"rate={rate*100:.3f}% fraud={resp['fraud_detected']}{vtxt} {nps:.2f} nonces/s -> {a.save}")
 
 
 def main():
@@ -95,6 +99,10 @@ def main():
     ap.add_argument("--seq-len", type=int, default=256)
     ap.add_argument("--max-tokens", type=int, default=256)
     ap.add_argument("--p-mismatch", type=float, default=0.1)
+    # artifacts also carry per-step pre-snap sphere slices (sph_values_steps).
+    # Generate refs with --debug AND validate with --debug to get the continuous
+    # vector-channel score (vector_score) next to the k-mismatch rate.
+    ap.add_argument("--debug", action="store_true")
     ap.add_argument("--save", required=True)
     a = ap.parse_args()
     if a.mode == "validate" and not a.ref:

@@ -158,6 +158,27 @@ pair_report.sh <honest-model> <fraud-model> runs/pairAB --profile cudagraph --ur
 Measured (100 samples, AWQ vs w8a16, cudagraph): honest **0.14%** / fraud **33.8%** →
 clean separation.
 
+### Vector channel (continuous, next to the k-mismatch rate)
+The sphere_k snap keeps ~4 bits/step, so a subtle fraud sits only a few pp above
+the honest cross-HW flip floor (A100: AWQ 9.5% vs floor ~7% cross-HW — under the
+fixed `p_mismatch=0.1` it slips through). The pre-snap slices carry the full
+displacement field: collect with `--debug` on BOTH sides and the validation
+response gains a `vector_score` (per-nonce mean cosine distance between prover
+and validator slices; the k-based verdict is unchanged — evidence for A/B).
+
+```bash
+collect.py --mode generate --model <honest> --debug --save gen_h.json --url $S
+collect.py --mode generate --model <fraud>  --debug --save gen_f.json --url $S
+collect.py --mode validate --model <honest> --debug --ref gen_h.json --save val_h.json --url $S
+collect.py --mode validate --model <honest> --debug --ref gen_f.json --save val_f.json --url $S
+vector_separation.py gen_h.json:val_h.json gen_f.json:val_f.json   # offline table
+```
+Measured (A100, MiniMax-M2.7 FP8 vs AWQ, 32 nonces × 256 steps): honest floor
+**9e-5**, honest cross-engine **3.5e-4**, fraud **5.5e-3** → fraud/floor 60×,
+no per-nonce overlap (worst honest 8.8e-4 < weakest fraud 3.0e-3), AUC 1.0,
+K=6 nonces — on the same trajectories where the k-rate misses at p_mismatch=0.1.
+Artifact cost: ~512 B/step fp16 (D=256); prefill keeps the legacy `vector_b64`.
+
 ## Test 2 — co-existence (GSM8K)
 A **separate** question from separation: does running PoC alongside real user inference
 degrade answer quality? Run GSM8K twice — once with PoC load, once without — and compare
