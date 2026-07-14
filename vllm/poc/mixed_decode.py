@@ -163,6 +163,12 @@ class PoCDecodeState:
     mismatch_t: "torch.Tensor | None" = None      # [1] int64 on-device accumulator
     n_nan_t: "torch.Tensor | None" = None         # [1] int64 non-finite-step counter (device)
     k_steps_t: list = field(default_factory=list)  # list of [1] int64; cat+tolist at end
+    # debug only (PoCParams.debug): the per-step pre-snap sphere slices — the same
+    # q whose argmax is sphere_k — kept so the documented PoCOutput.sph_values_steps
+    # contract (v1/outputs.py) can be emitted. list of [1, SPHERE_DIM] float tensors,
+    # index 0 = prefill, 1..N = decode; device-accumulated like k_steps_t (no
+    # per-step host sync), encoded once at emit.
+    q_steps_t: list = field(default_factory=list)
 
 
 class PoCMixedDecodeManager:
@@ -457,10 +463,12 @@ def process_poc_outputs_from_hidden(
             return encode_vector(yk.half().cpu().numpy())
 
         def _sphere_from_idx(sph):
-            """hidden -> (sphere index, non-finite mask) as [1] int64/bool TENSORs
-            (no .item(), so the chain stays on GPU and async scheduling works)."""
+            """hidden -> (sphere index, non-finite mask, pre-snap slice) as [1]/[1]/
+            [1, SPHERE_DIM] TENSORs (no .item(), so the chain stays on GPU and async
+            scheduling works)."""
             xk_sphere = project_to_sphere(torch.gather(last_hidden.unsqueeze(0), 1, sph))
-            return snap_with_guard(xk_sphere, codebook)  # (k[1] int64, bad[1] bool)
+            k_, bad_ = snap_with_guard(xk_sphere, codebook)  # (k[1] int64, bad[1] bool)
+            return k_, bad_, xk_sphere
 
         if st is None:
             # Prefill-only PoC: just the vector_b64 artifact.
@@ -477,8 +485,10 @@ def process_poc_outputs_from_hidden(
         sph0 = random_pick_indices(
             poc_params.block_hash, poc_params.public_key, [nonce],
             hidden_size, SPHERE_DIM, runner.device)
-        k0_t, bad0 = _sphere_from_idx(sph0)                 # [1] tensors
+        k0_t, bad0, q0 = _sphere_from_idx(sph0)             # [1]/[1]/[1,SPHERE_DIM]
         st.k_steps_t = [k0_t]
+        # debug: keep the pre-snap slice so sph_values_steps can be emitted
+        st.q_steps_t = [q0.detach()] if poc_params.debug else []
         st.mismatch_t = torch.zeros(1, dtype=torch.int64, device=runner.device)
         st.n_nan_t = bad0.to(torch.int64)                   # [1] non-finite-step counter
         if st.reference is not None:
@@ -507,14 +517,17 @@ def process_poc_outputs_from_hidden(
         sph = random_pick_indices_gpu(base_seeds, prev_k, steps, H, SPHERE_DIM, device)
         # snap_with_guard: argmax(NaN) is garbage -> non-finite rows return k=-1
         # (compute fault, NOT fraud). bad_all stays on device (no per-step sync).
-        k_all, bad_all = snap_with_guard(
-            project_to_sphere(torch.gather(lh, 1, sph)), codebook)   # [B] int64, [B] bool
+        q_all = project_to_sphere(torch.gather(lh, 1, sph))          # [B, SPHERE_DIM]
+        k_all, bad_all = snap_with_guard(q_all, codebook)            # [B] int64, [B] bool
 
         for i, meta in enumerate(decode_metas):
             st = meta['decode_state']
             step = meta['decode_step']
             k_t = k_all[i:i + 1]                               # [1] tensor (view)
             st.k_steps_t.append(k_t)
+            if meta['poc_params'].debug:
+                # debug: keep the pre-snap slice (device, like k_steps_t — no sync)
+                st.q_steps_t.append(q_all[i:i + 1].detach())
             st.n_nan_t += bad_all[i:i + 1].to(torch.int64)    # device accumulate (no sync)
             if st.reference_t is not None and step < st.reference_t.shape[0]:
                 ref = st.reference_t[step:step + 1]
@@ -535,6 +548,14 @@ def process_poc_outputs_from_hidden(
                         "(compute fault, NOT fraud; excluded from mismatch rate) — "
                         "trajectory suspect, re-run on a clean GPU",
                         meta['poc_params'].nonce, n_nan, len(k_points))
+                # debug: emit the documented sph_values_steps contract (v1/outputs.py)
+                # — one fp16-LE base64 slice per trajectory step, same wire format as
+                # vector_b64 (data.encode_vector). Single host copy, emit-once.
+                sph_vals = []
+                if meta['poc_params'].debug and st.q_steps_t:
+                    sph_vals = [
+                        encode_vector(q.squeeze(0).cpu().numpy())
+                        for q in st.q_steps_t]
                 poc_outputs[meta['req_id']] = PoCOutput(
                     nonce=meta['poc_params'].nonce,
                     vector_b64="",
@@ -542,6 +563,7 @@ def process_poc_outputs_from_hidden(
                     n_sphere_mismatches=(
                         n_mismatches if st.reference is not None else -1),
                     n_nan_steps=n_nan,
+                    sph_values_steps=sph_vals,
                 )
                 get_decode_manager(runner).free(meta['req_id'])
 

@@ -568,6 +568,10 @@ async def generate(request: Request, body: PoCGenerateRequest) -> dict:
     return {
         "status": "completed",
         "request_id": str(uuid.uuid4()),
+        # debug: expose the validator's own artifacts (incl. sph_values_steps) so a
+        # client can pair them with the prover's for offline vector-channel analysis;
+        # verdict-only response otherwise (unchanged).
+        "artifacts": computed_artifacts if body.debug else [],
         **validation_result,
     }
 
