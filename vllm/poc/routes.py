@@ -449,6 +449,10 @@ async def generate(request: Request, body: PoCGenerateRequest) -> dict:
             raise HTTPException(status_code=400, detail="validation.artifacts nonces must match nonces field")
     
     validation_map = {a.nonce: a.vector_b64 for a in body.validation.artifacts} if body.validation else None
+    # prover-side pre-snap slices (when the reference was generated with debug):
+    # lets run_validation attach the continuous vector-channel score as evidence.
+    ref_vectors = {a.nonce: a.sph_values_steps for a in body.validation.artifacts
+                   if a.sph_values_steps} if body.validation else None
     stat_test = body.stat_test or StatTestModel()
     
     if not body.wait:
@@ -563,6 +567,7 @@ async def generate(request: Request, body: PoCGenerateRequest) -> dict:
         # decode flow (max_tokens>0) → count sphere_k mismatches vs p_mismatch;
         # prefill flow → vector-L2 + binomial (unchanged). Same response shape.
         use_trajectory=body.params.max_tokens > 0,
+        ref_vectors=ref_vectors,
     )
 
     return {

@@ -1,9 +1,66 @@
 """PoC artifact validation logic."""
-from typing import Dict, List, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
 from .data import decode_vector, fraud_test, DEFAULT_DIST_THRESHOLD, DEFAULT_P_MISMATCH, DEFAULT_FRAUD_THRESHOLD
+
+
+def score_vector_channel(
+    computed_artifacts: List[Dict],
+    ref_vectors: Dict[int, List[str]],
+) -> Optional[Dict]:
+    """Continuous vector-channel score: per-step cosine distance between the
+    prover's pre-snap sphere slices (``sph_values_steps`` from the reference
+    artifacts) and the validator's own teacher-forced recompute.
+
+    Rationale: the sphere_k snap keeps ~4 bits/step — a mismatch fires only when
+    a deviation crosses a Voronoi boundary, so a subtle fraud (e.g. a close
+    quant) sits only a few pp above the honest cross-HW flip floor. The pre-snap
+    slices carry the full displacement field: honest cross-config distance is
+    ~1e-4 while a quant-fraud sits ~5e-3 on every step (A100 pilot: fraud/floor
+    60x, no per-nonce overlap), so the averaged distance separates where the
+    flip rate cannot. Consensus is untouched — the k-id chain still seeds the
+    next step; the distance is computed by ONE validator, whose threshold
+    absorbs cross-HW float drift instead of a bit-exact agreement.
+
+    Scores decode steps only (index 1..N; index 0 = prefill, which has its own
+    legacy vector_b64 path). Non-finite slices are skipped like the NaN guard.
+    Returns None when no (computed, reference) vector pair exists — e.g. debug
+    off on either side — so callers can attach it as optional evidence.
+    """
+    per_nonce: List[Dict] = []
+    for a in computed_artifacts:
+        ref_b64 = ref_vectors.get(a["nonce"]) or []
+        own_b64 = a.get("sph_values_steps") or []
+        n = min(len(ref_b64), len(own_b64))
+        if n < 2:      # need at least one decode step beyond the prefill slice
+            continue
+        dists = []
+        n_bad = 0
+        for t in range(1, n):
+            vp = decode_vector(ref_b64[t])
+            vv = decode_vector(own_b64[t])
+            if vp.shape != vv.shape or not (
+                    np.all(np.isfinite(vp)) and np.all(np.isfinite(vv))):
+                n_bad += 1
+                continue
+            dists.append(1.0 - float(np.dot(vp, vv)))
+        if dists:
+            per_nonce.append({
+                "nonce": a["nonce"],
+                "mean_dist": float(np.mean(dists)),
+                "n_steps_scored": len(dists),
+                "n_bad_steps": n_bad,
+            })
+    if not per_nonce:
+        return None
+    return {
+        "mean_dist": float(np.mean([e["mean_dist"] for e in per_nonce])),
+        "max_nonce_dist": float(max(e["mean_dist"] for e in per_nonce)),
+        "n_nonces_scored": len(per_nonce),
+        "per_nonce": per_nonce,
+    }
 
 
 def validate_artifacts(
@@ -63,6 +120,7 @@ def run_validation(
     fraud_threshold: float = DEFAULT_FRAUD_THRESHOLD,
     k_dim: int = 12,
     use_trajectory: bool = False,
+    ref_vectors: Optional[Dict[int, List[str]]] = None,
 ) -> Dict:
     """Run full validation with fraud test. Same response shape for both flows.
 
@@ -72,6 +130,10 @@ def run_validation(
       all steps; fraud when the mismatch rate exceeds p_mismatch (reused as the max
       allowed fraction). No binomial; p_value carries the rate but the decision
       ignores it.
+    - ref_vectors (optional, decode): prover-side sph_values_steps per nonce.
+      When both sides carry pre-snap slices, the continuous vector-channel score
+      (score_vector_channel) is attached as ``vector_score`` EVIDENCE — the
+      verdict stays k-based so the two channels can be A/B'd on the same run.
     """
     per_nonce: List[Dict] = []   # per-nonce evidence: [{nonce, n_sphere_mismatches, n_steps}]
     if use_trajectory:
@@ -99,7 +161,7 @@ def run_validation(
         )
         p_value, fraud_detected = fraud_test(n_mismatch, n_total, p_mismatch, fraud_threshold)
 
-    return {
+    result = {
         "n_total": n_total,
         "n_mismatch": n_mismatch,
         "mismatch_nonces": mismatch_nonces,
@@ -107,3 +169,8 @@ def run_validation(
         "p_value": p_value,
         "fraud_detected": fraud_detected,
     }
+    if use_trajectory and ref_vectors:
+        vector_score = score_vector_channel(computed_artifacts, ref_vectors)
+        if vector_score is not None:
+            result["vector_score"] = vector_score
+    return result
