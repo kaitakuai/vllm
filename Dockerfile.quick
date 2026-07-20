@@ -54,3 +54,12 @@ RUN VLLM_DIR=$(python3 -c "import vllm, os; print(os.path.dirname(vllm.__file__)
     && cd /tmp/vllm-src \
     && find . -name "*.py" | tar -cf - -T - | tar -xf - -C "$VLLM_DIR/" \
     && rm -rf /tmp/vllm-src
+
+# Pin the V1 model runner. vLLM 0.25 ships a parallel V2 GPU model runner
+# (vllm/v1/worker/gpu/) with its OWN InputBatch + sampler stack that BYPASSES
+# the residual sampler rows (per-request logprobs_mode, enforced_token_ids,
+# need_processed_logprobs). All four target models default to V1 today, but a
+# silent upstream default flip would void the PoC validation surface without
+# an error — pin it off. (dspark spec-decode requires V2 and is therefore
+# incompatible with this image by design.)
+ENV VLLM_USE_V2_MODEL_RUNNER=0
