@@ -5,7 +5,7 @@ ADR-0014 in `mlnode-foundry/docs/adr/0014-residual-fork-permanent-infra.md`
 treats this branch as permanent infrastructure (the Layer 3 upstream pathway
 is deferred without timeline). Each new vLLM minor is rebased mechanically
 by cherry-picking the same commit stack (6 sampler + 1 request-ingestion +
-1 runtime-stability) onto the upstream tag.
+1 runtime-stability + 1 V2-containment) onto the upstream tag.
 
 ## When upstream cuts `vM.N`
 
@@ -22,9 +22,9 @@ by cherry-picking the same commit stack (6 sampler + 1 request-ingestion +
    git checkout -b poc-sampler-residual-vM.N vM.N
    ```
 
-3. Cherry-pick the 8 SHAs (6 sampler + row 7 request-ingestion + row 8
-   runtime-stability) in chronological order from the most-recent residual
-   branch (`poc-sampler-residual-v<prev>`):
+3. Cherry-pick the 9 SHAs (6 sampler + row 7 request-ingestion + row 8
+   runtime-stability + row 9 V2-containment) in chronological order from the
+   most-recent residual branch (`poc-sampler-residual-v<prev>`):
 
    | # | SHA on v0.25 branch | Subject |
    |---|---------------------|---------|
@@ -62,12 +62,11 @@ by cherry-picking the same commit stack (6 sampler + 1 request-ingestion +
    git cherry-pick 3bfabea32 851f00c12 de33876ed 41c00253a 0431c3344 64d33dfca dd2024c9e ee06cbe9c 55a371c12
    ```
 
-   > **TODO (future rebase):** these SHAs are the commit IDs on
-   > `poc-sampler-residual-v0.25`. After the first cherry-pick onto
-   > `poc-sampler-residual-v0.24`, the SHAs will be new — record them
-   > here for the v0.25 rebase. Use `git log --grep` to find the
-   > corresponding commits on the prior residual branch if SHAs are
-   > forgotten:
+   > **TODO (future rebase):** these SHAs are the commit IDs on the
+   > previous residual branch. After each cherry-pick onto a new residual
+   > branch the SHAs are new — record them here for the following rebase.
+   > Use `git log --grep` to find the corresponding commits on the prior
+   > residual branch if SHAs are forgotten:
    >
    > ```bash
    > git log --oneline --grep='feat(sampling): add per-request logprobs_mode' poc-sampler-residual-v<prev>
@@ -78,6 +77,7 @@ by cherry-picking the same commit stack (6 sampler + 1 request-ingestion +
    > git log --oneline --grep='fix(sampler): thread need_processed_logprobs through forward_xpu' poc-sampler-residual-v<prev>
    > git log --oneline --grep='feat(validation): add enforced_tokens request ingestion' poc-sampler-residual-v<prev>
    > git log --oneline --grep='fix(distributed): enlarge shm MessageQueue rings' poc-sampler-residual-v<prev>
+   > git log --oneline --grep='feat(runner): pin V1 model runner' poc-sampler-residual-v<prev>
    > ```
 
 4. Update `setup.py` `get_vllm_version()` to bump the local-version
@@ -93,10 +93,12 @@ by cherry-picking the same commit stack (6 sampler + 1 request-ingestion +
    git commit -am "chore: tag as M.N.0+gonka.sampler1"
    ```
 
-6. Inspect `Dockerfile.quick` and bump the base image:
+6. Inspect `Dockerfile.quick` and bump the base image. Per the policy at
+   the top of `Dockerfile.quick`, ride vLLM's recommended default image
+   (bare tag — do NOT pin a `-cuXXX` variant):
 
    ```dockerfile
-   FROM vllm/vllm-openai:vM.N.0-cu129
+   ARG BASE_IMAGE=vllm/vllm-openai:vM.N.0
    ```
 
    Commit that bump together with any version-string mirrors in
@@ -109,7 +111,7 @@ by cherry-picking the same commit stack (6 sampler + 1 request-ingestion +
    ```
 
 8. CI workflow `contract-tests-residual.yml` runs on the push.
-   The **in-fork** job MUST be green — that confirms all 6 patches still
+   The **in-fork** job MUST be green — that confirms all 9 patches still
    apply cleanly and the patched surfaces are still in place.
 
 9. The **upstream-drift** job (`continue-on-error: true`) MAY fail.
@@ -121,12 +123,15 @@ by cherry-picking the same commit stack (6 sampler + 1 request-ingestion +
    * If upstream removed a hook our patch depended on, the patch itself
      needs revision — see "What if a cherry-pick conflicts" below.
 
-10. Update foundry to consume the new image. The residual image digest
-    is pinned in `mlnode-foundry/stage2.lock.cue` (or its successor —
-    wiring lands in the next step of this rollout). Bump:
+10. Update foundry to consume the new image. The residual image is
+    pinned in `mlnode-foundry` `tools/stage3.lock.cue` under
+    `stage2.{tag,digest}`. Bump:
 
     ```cue
-    sampler_residual_image: "ghcr.io/kaitakuai/vllm-sampler-residual@sha256:<new-digest>"
+    stage2: {
+        tag:    "<new-tag>"
+        digest: "sha256:<new-digest>"
+    }
     ```
 
 ## v0.23 -> v0.25.1 rebase notes (2026-07-19)

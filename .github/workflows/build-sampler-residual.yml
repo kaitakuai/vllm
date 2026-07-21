@@ -2,11 +2,13 @@ name: build-sampler-residual
 
 # Builds and publishes the kaitakuai sampler-stack residual image on top of
 # upstream vLLM 0.25.1 (recommended default tag → CUDA 13.0). This branch (poc-sampler-residual-v0.25)
-# carries the 6-commit sampler stack (mixed-mode sampling, enforced tokens,
+# carries the 9-commit residual stack (mixed-mode sampling, enforced tokens,
 # logprobs_mode, structured-output graceful degradation, InputBatch
-# bookkeeping, xpu thread-through). The wheel version baked into the image's
-# vllm._version is 0.25.1+gonka.sampler1; the OCI tag substitutes '-' for
-# '+' because the plus character is not a valid OCI tag character.
+# bookkeeping, xpu thread-through, enforced_tokens request ingestion, shm
+# MessageQueue ring enlargement, V1 runner pin). The wheel version baked
+# into the image's vllm._version is 0.25.1+gonka.sampler1; the OCI tag
+# substitutes '-' for '+' because the plus character is not a valid OCI
+# tag character.
 #
 # This is an *overlay* build (Dockerfile.quick):
 #   FROM vllm/vllm-openai:v0.25.1
