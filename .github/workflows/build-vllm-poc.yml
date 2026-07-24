@@ -98,9 +98,20 @@ jobs:
           GONKA_POC_REF="${INPUT_GONKA_POC_REF:-$GONKA_POC_DEFAULT_REF}"
           IMAGE_TAG="${INPUT_IMAGE_TAG:-0.23.0}"
 
-          # Resolve GONKA_POC_REF to a full SHA so the immutable tag pins the
-          # exact plugin commit even when a branch/tag was supplied.
-          GONKA_POC_SHA="$(git ls-remote "https://github.com/${GONKA_POC_REPO}" "${GONKA_POC_REF}" | awk '{print $1}' | head -n1)"
+          # Resolve GONKA_POC_REF to a full COMMIT sha so the immutable tag and
+          # the image label pin something that actually exists in the history.
+          #
+          # Order matters. For an ANNOTATED tag, ls-remote reports two refs:
+          #   <tag-object-sha>  refs/tags/v1.2.3
+          #   <commit-sha>      refs/tags/v1.2.3^{}
+          # Querying the plain ref first would take the tag object — a sha that
+          # is not a commit and cannot be found in `git log`. So ask for the
+          # peeled ref first, and fall back only when there is nothing to peel
+          # (lightweight tag or branch), then to the ref itself (raw sha).
+          GONKA_POC_SHA="$(git ls-remote "https://github.com/${GONKA_POC_REPO}" "${GONKA_POC_REF}^{}" | awk '{print $1}' | head -n1)"
+          if [ -z "${GONKA_POC_SHA}" ]; then
+            GONKA_POC_SHA="$(git ls-remote "https://github.com/${GONKA_POC_REPO}" "${GONKA_POC_REF}" | awk '{print $1}' | head -n1)"
+          fi
           if [ -z "${GONKA_POC_SHA}" ]; then
             # Ref was already a SHA (ls-remote returns nothing for a raw SHA).
             GONKA_POC_SHA="${GONKA_POC_REF}"
