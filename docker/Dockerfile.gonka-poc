@@ -1,0 +1,46 @@
+# Composes the full Gonka "S2" image = vLLM 0.25.1 + PoC-v2 thin residual
+# (this repo) + the out-of-tree gonka-poc plugin (pip). PoC compute logic
+# lives in the PLUGIN, not in-tree; only the irreducible sampler residual
+# ships inside vllm/.
+#
+#   docker build -f docker/Dockerfile.gonka-poc -t vllm-poc:0.25.1 .
+#
+# Reproduces ghcr.io/kaitakuai/vllm-poc@sha256:72423e85... (our reference S2).
+
+ARG BASE_IMAGE=vllm/vllm-openai:v0.25.1
+FROM ${BASE_IMAGE}
+
+# --- Gonka PoC-v2 runtime env -------------------------------------------------
+ENV VLLM_ALLOW_INSECURE_SERIALIZATION=1
+# NVFP4 / FP8 fast paths on Blackwell (B200/B300/RTX PRO 6000); harmless elsewhere.
+ENV VLLM_USE_FLASHINFER_MOE_FP4=1
+ENV VLLM_USE_FLASHINFER_MOE_FP8=1
+
+RUN pip install --no-cache-dir scipy
+
+# --- S1: overlay the in-tree sampler residual (.py only, no CUDA rebuild) ------
+# The 14 residual files live in this repo's vllm/ tree; we merge only .py into
+# the pre-built package, preserving compiled .so.
+COPY ./vllm /tmp/vllm-src
+RUN VLLM_DIR=$(python3 -c "import vllm, os; print(os.path.dirname(vllm.__file__))") \
+    && [ -d "$VLLM_DIR" ] || (echo "ERROR: vllm not importable"; exit 1) \
+    && cd /tmp/vllm-src \
+    && find . -name "*.py" | tar -cf - -T - | tar -xf - -C "$VLLM_DIR/" \
+    && rm -rf /tmp/vllm-src
+
+# Pin the V1 model runner: vLLM 0.25 ships a parallel V2 GPU runner with its own
+# sampler/InputBatch that bypasses the residual. Off = PoC validation surface intact.
+ENV VLLM_USE_V2_MODEL_RUNNER=0
+
+# --- S2: add the out-of-tree PoC plugin (pip) ---------------------------------
+# All PoC compute (nonce gen, RNG, Householder scoring, L2/fraud validation,
+# DeepSeek-V4 support) is in the plugin — NOT in this repo.
+# Pinned to a tag rather than a branch: the plugin repository is being handed
+# over to the gonka-ai organisation, and a branch would resolve to whatever
+# HEAD it has at build time. v0.1.0a0 is the first tagged release and is
+# immutable across the ownership change.
+ARG GONKA_POC_REPO=kaitakuai/gonka-poc
+ARG GONKA_POC_REF=v0.1.0a0
+RUN pip install --no-cache-dir --no-deps \
+      "gonka-poc @ git+https://github.com/${GONKA_POC_REPO}@${GONKA_POC_REF}" \
+    && pip install --no-cache-dir "aiohttp>=3.9" "scipy>=1.10" "fastapi<0.137" "pydantic>=2"
