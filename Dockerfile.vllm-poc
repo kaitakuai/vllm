@@ -32,6 +32,13 @@ ARG RESIDUAL_IMAGE
 # reproducible. The workflow passes a full SHA.
 ARG GONKA_POC_REF
 
+# GONKA_POC_REPO: owner/name of the plugin source repo. Parameterised because
+# the plugin is being handed over to the gonka-ai organisation: after the
+# transfer this becomes gonka-ai/gonka-poc. GitHub redirects the old path, but
+# the fetch below is a plain-HTTP tarball (not git), so we point at the real
+# location rather than leaning on a redirect.
+ARG GONKA_POC_REPO=kaitakuai/gonka-poc
+
 # Mandatory: collective_rpc msgpack channel between the API process and the
 # worker (PoC artifacts ride this channel). Documented in the gonka-poc README
 # "Required runtime configuration" table. The S1 residual base already sets
@@ -45,7 +52,7 @@ ENV VLLM_ALLOW_INSECURE_SERIALIZATION=1
 # GitHub serves /archive/<ref>.tar.gz over plain HTTP, so pip builds the
 # sdist with no git dependency. GONKA_POC_REF is a full SHA (reproducible).
 RUN pip install --no-cache-dir --no-deps \
-    "gonka-poc @ https://github.com/kaitakuai/gonka-poc/archive/${GONKA_POC_REF}.tar.gz"
+    "gonka-poc @ https://github.com/${GONKA_POC_REPO}/archive/${GONKA_POC_REF}.tar.gz"
 
 # gonka-poc runtime deps that --no-deps skipped. On the CURRENT S1 residual
 # base every one of these is ALREADY satisfied:
