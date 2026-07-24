@@ -114,13 +114,10 @@ class Sampler(nn.Module):
             logits, sampling_metadata, predict_bonus_token
         )
 
-        need_processed = (
-            num_logprobs is not None
-            and effective_mode in (
-                "processed_logprobs",
-                "processed_logits",
-                "mixed",
-            )
+        need_processed = num_logprobs is not None and effective_mode in (
+            "processed_logprobs",
+            "processed_logits",
+            "mixed",
         )
         # Sample the next token.
         sampled, processed_logprobs = self.sample(
@@ -187,9 +184,7 @@ class Sampler(nn.Module):
                     processed_logprobs,
                     raw_logprobs,
                 )
-                logprobs_tensors = LogprobsTensors(
-                    torch.empty(0), lp, torch.empty(0)
-                )
+                logprobs_tensors = LogprobsTensors(torch.empty(0), lp, torch.empty(0))
             else:
                 raw_gathered = self.gather_logprobs(
                     raw_logprobs, num_logprobs, token_ids=sampled
@@ -354,8 +349,7 @@ class Sampler(nn.Module):
                     if logprobs_mode == "processed_logits":
                         processed_logprobs = logits
                     elif (
-                        logprobs_mode == "processed_logprobs"
-                        or need_processed_logprobs
+                        logprobs_mode == "processed_logprobs" or need_processed_logprobs
                     ):
                         processed_logprobs = self.compute_logprobs(logits)
                 return greedy_sampled, processed_logprobs

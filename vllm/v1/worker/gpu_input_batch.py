@@ -844,9 +844,7 @@ class InputBatch:
         for i in range(num_reqs):
             req_id = self._req_ids[i]
             etids = (
-                self.req_enforced_token_ids.get(req_id)
-                if req_id is not None
-                else None
+                self.req_enforced_token_ids.get(req_id) if req_id is not None else None
             )
             if etids:
                 out = self.req_output_token_ids[i]
@@ -865,9 +863,7 @@ class InputBatch:
         """Update enforced_next_token_ids on sampling_metadata each step."""
         if self.sampling_metadata is None:
             return
-        self.sampling_metadata.enforced_next_token_ids = (
-            self._build_enforced_tensor()
-        )
+        self.sampling_metadata.enforced_next_token_ids = self._build_enforced_tensor()
 
     def refresh_metadata(self):
         """Apply any batch updates to sampling metadata."""

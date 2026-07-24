@@ -18,6 +18,7 @@ effective:
 
 Scope: read-only inspection; NO GPU, NO engine startup.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -29,9 +30,7 @@ def test_v2_runner_env_knob_exists() -> None:
     """VLLM_USE_V2_MODEL_RUNNER must still be a recognized env knob."""
     pytest.importorskip("vllm")
     envs = importlib.import_module("vllm.envs")
-    assert "VLLM_USE_V2_MODEL_RUNNER" in getattr(
-        envs, "environment_variables", {}
-    ), (
+    assert "VLLM_USE_V2_MODEL_RUNNER" in getattr(envs, "environment_variables", {}), (
         "VLLM_USE_V2_MODEL_RUNNER is gone from vllm.envs — the baked "
         "Dockerfile pin is a silent no-op. Find the new V2-runner switch and "
         "re-pin (row 9), or confirm the V2 runner was removed/unified."

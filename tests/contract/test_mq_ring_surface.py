@@ -12,6 +12,7 @@ Two modes (see ``test_sampler_surface.py`` header + REBASE.md):
 
 Scope: read-only source inspection; NO GPU, NO engine startup.
 """
+
 from __future__ import annotations
 
 import inspect

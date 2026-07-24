@@ -23,6 +23,7 @@ Two modes (see ``test_sampler_surface.py`` header + REBASE.md):
 
 Scope: read-only module/class inspection; NO GPU, NO engine startup, NO forward pass.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -30,10 +31,10 @@ import inspect
 
 import pytest
 
-
 # ---------------------------------------------------------------------------- #
 # vllm.validation.EnforcedTokens helper (new module)
 # ---------------------------------------------------------------------------- #
+
 
 def test_validation_module_has_enforced_tokens() -> None:
     """Pin the ``vllm.validation`` helper classes added by the ingestion commit.
@@ -69,6 +70,7 @@ def test_validation_module_has_enforced_tokens() -> None:
 # ChatCompletionRequest enforced_tokens / enforced_str / logprobs_mode fields
 # ---------------------------------------------------------------------------- #
 
+
 def test_chat_request_has_enforced_token_fields() -> None:
     """Pin the request fields that carry a validator's enforced-token payload.
 
@@ -79,9 +81,7 @@ def test_chat_request_has_enforced_token_fields() -> None:
         - Upstream-drift: upstream ChatCompletionRequest lacks these (expected).
     """
     pytest.importorskip("vllm")
-    mod = importlib.import_module(
-        "vllm.entrypoints.openai.chat_completion.protocol"
-    )
+    mod = importlib.import_module("vllm.entrypoints.openai.chat_completion.protocol")
     cls = getattr(mod, "ChatCompletionRequest", None)
     assert cls is not None, (
         "vllm.entrypoints.openai.chat_completion.protocol.ChatCompletionRequest "
@@ -104,6 +104,7 @@ def test_chat_request_has_enforced_token_fields() -> None:
 # OpenAIServingChat bridges request fields -> sampling_params.enforced_token_ids
 # ---------------------------------------------------------------------------- #
 
+
 def test_chat_serving_writes_enforced_token_ids() -> None:
     """Pin that the chat serving path converts the request fields into
     ``sampling_params.enforced_token_ids``.
@@ -114,13 +115,10 @@ def test_chat_serving_writes_enforced_token_ids() -> None:
           never enforced. Re-port the ingestion commit (REBASE.md row 7).
     """
     pytest.importorskip("vllm")
-    mod = importlib.import_module(
-        "vllm.entrypoints.openai.chat_completion.serving"
-    )
+    mod = importlib.import_module("vllm.entrypoints.openai.chat_completion.serving")
     cls = getattr(mod, "OpenAIServingChat", None)
     assert cls is not None, (
-        "OpenAIServingChat missing — module restructured; re-port the ingestion "
-        "commit."
+        "OpenAIServingChat missing — module restructured; re-port the ingestion commit."
     )
     src = inspect.getsource(cls)
     assert "enforced_token_ids" in src, (

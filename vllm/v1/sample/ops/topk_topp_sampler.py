@@ -357,7 +357,10 @@ class TopKTopPSampler(nn.Module):
                     "PyTorch-native implementation."
                 )
             return self.forward_native(
-                logits, generators, k, p,
+                logits,
+                generators,
+                k,
+                p,
                 need_processed_logprobs=need_processed_logprobs,
             )
         random_sampled = torch.empty(
