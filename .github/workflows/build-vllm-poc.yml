@@ -35,7 +35,10 @@ on:
         description: 'S1 residual base. Default: ghcr.io/kaitakuai/vllm-sampler-residual:0.23.0-gonka.sampler1. Pin to a digest for reproducibility.'
         required: false
       gonka_poc_ref:
-        description: 'gonka-poc git ref (full SHA preferred). Default: main.'
+        description: 'gonka-poc git ref (full SHA preferred). Default: the pinned GONKA_POC_DEFAULT_REF below — deliberately NOT a branch.'
+        required: false
+      gonka_poc_repo:
+        description: 'gonka-poc source repo (owner/name). Default: GONKA_POC_REPO below. Change after the gonka-ai transfer.'
         required: false
       image_tag:
         description: 'Mutable image tag. Default: 0.23.0.'
@@ -73,16 +76,31 @@ jobs:
         env:
           INPUT_RESIDUAL_IMAGE: ${{ inputs.residual_image }}
           INPUT_GONKA_POC_REF: ${{ inputs.gonka_poc_ref }}
+          INPUT_GONKA_POC_REPO: ${{ inputs.gonka_poc_repo }}
           INPUT_IMAGE_TAG: ${{ inputs.image_tag }}
         run: |
           set -euo pipefail
+
+          # Single point of change when the plugin repo moves to the gonka-ai
+          # organisation. GitHub redirects the old path, but relying on a
+          # redirect for a plain-HTTP /archive/<ref>.tar.gz fetch is fragile,
+          # so we resolve it explicitly.
+          GONKA_POC_REPO="${INPUT_GONKA_POC_REPO:-kaitakuai/gonka-poc}"
+
+          # Pinned default, NOT a branch. `main` as a default would silently
+          # follow whatever HEAD the plugin repo has — and after the gonka-ai
+          # transfer that HEAD belongs to another organisation. An unattended
+          # rebuild must reproduce a known plugin commit, never track someone
+          # else's branch.
+          GONKA_POC_DEFAULT_REF="ece7c2b2de617894995caa432a058bf639f5e82f"
+
           RESIDUAL_IMAGE="${INPUT_RESIDUAL_IMAGE:-ghcr.io/kaitakuai/vllm-sampler-residual:0.23.0-gonka.sampler1}"
-          GONKA_POC_REF="${INPUT_GONKA_POC_REF:-main}"
+          GONKA_POC_REF="${INPUT_GONKA_POC_REF:-$GONKA_POC_DEFAULT_REF}"
           IMAGE_TAG="${INPUT_IMAGE_TAG:-0.23.0}"
 
           # Resolve GONKA_POC_REF to a full SHA so the immutable tag pins the
           # exact plugin commit even when a branch/tag was supplied.
-          GONKA_POC_SHA="$(git ls-remote https://github.com/kaitakuai/gonka-poc "${GONKA_POC_REF}" | awk '{print $1}' | head -n1)"
+          GONKA_POC_SHA="$(git ls-remote "https://github.com/${GONKA_POC_REPO}" "${GONKA_POC_REF}" | awk '{print $1}' | head -n1)"
           if [ -z "${GONKA_POC_SHA}" ]; then
             # Ref was already a SHA (ls-remote returns nothing for a raw SHA).
             GONKA_POC_SHA="${GONKA_POC_REF}"
@@ -94,6 +112,7 @@ jobs:
           IMMUTABLE_TAG="${IMAGE_REPO}:${IMAGE_TAG}-${GONKA_POC_SHA9}"
           {
             echo "residual_image=$RESIDUAL_IMAGE"
+            echo "gonka_poc_repo=$GONKA_POC_REPO"
             echo "gonka_poc_ref=$GONKA_POC_REF"
             echo "gonka_poc_sha=$GONKA_POC_SHA"
             echo "gonka_poc_sha9=$GONKA_POC_SHA9"
@@ -102,7 +121,7 @@ jobs:
             echo "mutable_tag=$MUTABLE_TAG"
             echo "immutable_tag=$IMMUTABLE_TAG"
           } >> "$GITHUB_OUTPUT"
-          echo "Resolved: RESIDUAL_IMAGE=$RESIDUAL_IMAGE, GONKA_POC_REF=$GONKA_POC_REF ($GONKA_POC_SHA9) -> $MUTABLE_TAG (also $IMMUTABLE_TAG)"
+          echo "Resolved: RESIDUAL_IMAGE=$RESIDUAL_IMAGE, GONKA_POC_REPO=$GONKA_POC_REPO, GONKA_POC_REF=$GONKA_POC_REF ($GONKA_POC_SHA9) -> $MUTABLE_TAG (also $IMMUTABLE_TAG)"
 
       - name: Login to GHCR
         uses: docker/login-action@v3
@@ -133,6 +152,7 @@ jobs:
           cache-to: type=registry,ref=${{ steps.tag.outputs.mutable_tag }}-buildcache,mode=max
           build-args: |
             RESIDUAL_IMAGE=${{ steps.tag.outputs.residual_image }}
+            GONKA_POC_REPO=${{ steps.tag.outputs.gonka_poc_repo }}
             GONKA_POC_REF=${{ steps.tag.outputs.gonka_poc_sha }}
           labels: |
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
