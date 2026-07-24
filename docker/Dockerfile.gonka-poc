@@ -35,7 +35,12 @@ ENV VLLM_USE_V2_MODEL_RUNNER=0
 # --- S2: add the out-of-tree PoC plugin (pip) ---------------------------------
 # All PoC compute (nonce gen, RNG, Householder scoring, L2/fraud validation,
 # DeepSeek-V4 support) is in the plugin — NOT in this repo.
-ARG GONKA_POC_REF=e24861a035f03a87cc7ff51d0569c418f42fe9d2
+# Pinned to a tag rather than a branch: the plugin repository is being handed
+# over to the gonka-ai organisation, and a branch would resolve to whatever
+# HEAD it has at build time. v0.1.0a0 is the first tagged release and is
+# immutable across the ownership change.
+ARG GONKA_POC_REPO=kaitakuai/gonka-poc
+ARG GONKA_POC_REF=v0.1.0a0
 RUN pip install --no-cache-dir --no-deps \
-      "gonka-poc @ git+https://github.com/kaitakuai/gonka-poc@${GONKA_POC_REF}" \
+      "gonka-poc @ git+https://github.com/${GONKA_POC_REPO}@${GONKA_POC_REF}" \
     && pip install --no-cache-dir "aiohttp>=3.9" "scipy>=1.10" "fastapi<0.137" "pydantic>=2"
