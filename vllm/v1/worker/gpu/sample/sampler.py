@@ -56,6 +56,22 @@ class Sampler:
     def add_request(
         self, req_idx: int, prompt_len: int, sampling_params: SamplingParams
     ) -> None:
+        # This sampler has its own sampling path and does not read
+        # enforced_token_ids or per-request logprobs_mode. Accepting such a
+        # request would return a plausible-looking completion that ignores
+        # both -- a validator would treat the reply as a verified replay when
+        # nothing was enforced. Fail loudly instead of degrading silently.
+        if sampling_params.enforced_token_ids is not None:
+            raise NotImplementedError(
+                "enforced_token_ids is not supported by the V2 model runner. "
+                "Run with VLLM_USE_V2_MODEL_RUNNER=0, or drop the parameter."
+            )
+        if sampling_params.logprobs_mode is not None:
+            raise NotImplementedError(
+                "Per-request logprobs_mode is not supported by the V2 model "
+                "runner. Run with VLLM_USE_V2_MODEL_RUNNER=0, or use the "
+                "engine-level --logprobs-mode instead."
+            )
         self.sampling_states.add_request(req_idx, sampling_params)
         self.penalties_state.add_request(req_idx, sampling_params)
         self.logit_bias_state.add_request(req_idx, prompt_len, sampling_params)
