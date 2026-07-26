@@ -120,10 +120,14 @@ class Sampler(nn.Module):
             "mixed",
         )
         # Sample the next token.
+        # The override is deliberately not forwarded to sample(): upstream does
+        # not forward it either, and doing so changes what the speculative
+        # decoding path returns. sample() keeps deciding by the deployment mode,
+        # while need_processed_logprobs only asks it to also produce processed
+        # values for the rows that want them.
         sampled, processed_logprobs = self.sample(
             logits,
             sampling_metadata,
-            logprobs_mode_override=logprobs_mode_override,
             need_processed_logprobs=need_processed,
         )
 
