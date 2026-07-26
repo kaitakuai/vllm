@@ -20,6 +20,25 @@ from pydantic import BaseModel, Field
 MAX_ENFORCED_TOKENS = 32768
 MAX_TOP_TOKENS_PER_POSITION = 64
 
+# Prefix vLLM uses when a request asks for token ids instead of text.
+_TOKEN_ID_PREFIX = "token_id:"
+
+
+def _parse_token_id(token: str) -> int | None:
+    """Return the id a token string denotes, or None if it denotes text.
+
+    Only a plain decimal is accepted, so forms that ``int()`` would otherwise
+    take -- underscores, non-ASCII digits, surrounding whitespace, a sign --
+    are treated as text and tokenized instead of being silently reinterpreted
+    as an id.
+    """
+    body = (
+        token[len(_TOKEN_ID_PREFIX) :] if token.startswith(_TOKEN_ID_PREFIX) else token
+    )
+    # isascii() matters: isdigit() alone is true for non-ASCII digits, so "٣"
+    # would resolve to id 3 instead of being tokenized as the text it is.
+    return int(body) if body.isascii() and body.isdigit() else None
+
 
 class EnforcedToken(BaseModel):
     token: str
@@ -30,20 +49,37 @@ class EnforcedToken(BaseModel):
     top_token_ids: list[int] = Field(default_factory=list, exclude=True)
 
     def encode(self, tokenizer) -> None:
-        """Convert token strings to token IDs.
-        Tokens from gonka API are already numeric strings (token IDs)."""
-        try:
-            self.token_id = int(self.token)
-            self.top_token_ids = [int(t) for t in self.top_tokens]
-        except ValueError:
-            # Fallback: tokenize the string
-            ids = tokenizer.encode(self.token, add_special_tokens=False)
-            self.token_id = ids[0] if ids else 0
-            self.top_token_ids = []
-            for t in self.top_tokens:
-                t_ids = tokenizer.encode(t, add_special_tokens=False)
-                if t_ids:
-                    self.top_token_ids.append(t_ids[0])
+        """Resolve the token strings in this position to token ids.
+
+        Accepts the ``token_id:N`` form that vLLM emits for a request with
+        ``return_tokens_as_token_ids``, which is how a validator should ask
+        for ids rather than text: it is the engine's own contract, it round
+        trips through ``resolve_token_id_placeholder``, and it does not
+        require changing what every other client sees.
+
+        A bare decimal string is also accepted, since that is what earlier
+        validators send. Anything else is treated as text and tokenized.
+        """
+        parsed = _parse_token_id(self.token)
+        if parsed is not None:
+            self.token_id = parsed
+            self.top_token_ids = [
+                tid
+                for tid in (_parse_token_id(t) for t in self.top_tokens)
+                if tid is not None
+            ]
+            return
+
+        # Text token: tokenize. A string that does not resolve to at least one
+        # id is left out rather than mapped to id 0, which would otherwise be
+        # indistinguishable from a genuine id 0 downstream.
+        ids = tokenizer.encode(self.token, add_special_tokens=False)
+        self.token_id = ids[0] if ids else None
+        self.top_token_ids = []
+        for t in self.top_tokens:
+            t_ids = tokenizer.encode(t, add_special_tokens=False)
+            if t_ids:
+                self.top_token_ids.append(t_ids[0])
 
 
 class EnforcedTokens(BaseModel):
