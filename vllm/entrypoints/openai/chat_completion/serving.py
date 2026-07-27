@@ -66,6 +66,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.collection_utils import as_list
 from vllm.utils.mistral import is_mistral_tool_parser
+from vllm.validation import validate_enforced_token_ids
 
 logger = init_logger(__name__)
 
@@ -329,8 +330,24 @@ class OpenAIServingChat(GenerateBaseServing):
                     enforced_ids = request.enforced_tokens.get_enforced_token_ids()
 
                 if enforced_ids:
-                    if enforced_ids[-1] != tokenizer.eos_token_id:
-                        enforced_ids.append(tokenizer.eos_token_id)
+                    # Untrusted input: these ids go straight into an embedding
+                    # lookup, where an out-of-range value is a device-side
+                    # assert that takes the worker down along with every other
+                    # request on it, rather than a rejected request.
+                    try:
+                        validate_enforced_token_ids(
+                            enforced_ids, self.model_config.get_vocab_size()
+                        )
+                    except ValueError as e:
+                        return self.create_error_response(
+                            str(e), param="enforced_tokens"
+                        )
+                    # TokenizerLike types eos_token_id as int, but it is None
+                    # for some models, and a None in the id list fails inside
+                    # the worker instead of failing the request.
+                    eos_token_id = tokenizer.eos_token_id
+                    if eos_token_id is not None and enforced_ids[-1] != eos_token_id:
+                        enforced_ids.append(eos_token_id)
                     sampling_params.enforced_token_ids = enforced_ids
                     if (
                         sampling_params.logprobs_mode is None
