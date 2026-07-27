@@ -849,9 +849,11 @@ class InputBatch:
             if etids:
                 out = self.req_output_token_ids[i]
                 out_len = len(out) if out else 0
-                enforced_list.append(
-                    etids[out_len] if out_len < len(etids) else etids[-1]
-                )
+                # Past the end of the replay, stop enforcing rather than
+                # repeating the final id: the sequence has been reproduced, and
+                # pinning every later step to one token prevents the request
+                # from ever finishing on its own.
+                enforced_list.append(etids[out_len] if out_len < len(etids) else -1)
                 has_any = True
             else:
                 enforced_list.append(-1)
