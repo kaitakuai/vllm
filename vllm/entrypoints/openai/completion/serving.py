@@ -48,6 +48,7 @@ from vllm.sampling_params import BeamSearchParams, SamplingParams
 from vllm.tokenizers import TokenizerLike
 from vllm.utils.async_utils import merge_async_iterators
 from vllm.utils.collection_utils import as_list
+from vllm.validation import validate_enforced_token_ids
 
 logger = init_logger(__name__)
 
@@ -128,6 +129,56 @@ class OpenAIServingCompletion(GenerateBaseServing):
             self._create_completion(request, raw_request), request, raw_request
         )
 
+    def _apply_enforced_tokens(
+        self,
+        request: CompletionRequest,
+        sampling_params: SamplingParams,
+    ) -> ErrorResponse | None:
+        """Resolve a replay payload onto sampling_params, or return a 400.
+
+        Mirrors the chat path. Kept here rather than shared with it because
+        the two request models have no common base carrying these fields.
+        """
+        tokenizer = self.renderer.tokenizer
+        enforced_ids: list[int] | None = None
+        if request.enforced_str:
+            if tokenizer is None:
+                return self.create_error_response(
+                    "enforced_str requires a tokenizer, but the server was "
+                    "started with skip_tokenizer_init=True",
+                    param="enforced_str",
+                )
+            enforced_ids = tokenizer.encode(
+                request.enforced_str, add_special_tokens=False
+            )
+        elif request.enforced_tokens:
+            request.enforced_tokens.encode(tokenizer)
+            enforced_ids = request.enforced_tokens.get_enforced_token_ids()
+
+        if not enforced_ids:
+            return None
+
+        # Untrusted input: these ids go straight into an embedding lookup,
+        # where an out-of-range value is a device-side assert that takes the
+        # worker down along with every other request on it.
+        try:
+            validate_enforced_token_ids(
+                enforced_ids, self.model_config.get_vocab_size()
+            )
+        except ValueError as e:
+            return self.create_error_response(str(e), param="enforced_tokens")
+
+        eos_token_id = getattr(tokenizer, "eos_token_id", None)
+        if eos_token_id is not None and enforced_ids[-1] != eos_token_id:
+            enforced_ids.append(eos_token_id)
+        sampling_params.enforced_token_ids = enforced_ids
+
+        if sampling_params.logprobs_mode is None and request.enforced_tokens:
+            detected = request.enforced_tokens.detect_logprobs_mode()
+            if detected:
+                sampling_params.logprobs_mode = detected
+        return None
+
     async def _create_completion(
         self,
         request: CompletionRequest,
@@ -179,6 +230,9 @@ class OpenAIServingCompletion(GenerateBaseServing):
                     max_tokens,
                     self.default_sampling_params,
                 )
+                error = self._apply_enforced_tokens(request, sampling_params)
+                if error is not None:
+                    return error
 
             request_id_item = f"{request_id}-{i}"
 

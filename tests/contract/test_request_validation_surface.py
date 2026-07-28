@@ -119,3 +119,20 @@ def test_sampling_params_carries_replay_ids() -> None:
         "SamplingParams.enforced_token_ids is missing — the ingestion path has "
         "nowhere to write decoded replay ids, so enforcement never fires"
     )
+
+
+def test_completions_endpoint_carries_replay_fields() -> None:
+    """/v1/completions must accept the same replay fields as /v1/chat/completions.
+
+    A validator that points at the wrong endpoint would otherwise have its
+    payload silently dropped by the request model and get an ordinary
+    completion back -- indistinguishable from a verified replay.
+    """
+    pytest.importorskip("vllm")
+    mod = importlib.import_module("vllm.entrypoints.openai.completion.protocol")
+    fields = mod.CompletionRequest.model_fields
+    for name in ("enforced_tokens", "enforced_str", "logprobs_mode"):
+        assert name in fields, (
+            f"CompletionRequest is missing {name!r} — a replay sent to "
+            f"/v1/completions would be dropped during parsing"
+        )
