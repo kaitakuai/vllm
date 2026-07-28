@@ -41,10 +41,11 @@ RUN INSTALLED=$(python3 -c "import vllm; print(vllm.__version__)") \
 # that enforced nothing.
 ENV VLLM_USE_V2_MODEL_RUNNER=0
 
-# The out-of-tree plugin, pinned to a tag: the plugin repository is being handed
-# over to the gonka-ai organisation, and a branch would resolve to whatever HEAD
-# it has at build time.
-ARG GONKA_POC_REPO=kaitakuai/gonka-poc
+# The out-of-tree plugin, pinned to a tag rather than a branch, which would
+# resolve to whatever HEAD it has at build time. Lives in the gonka-ai
+# organisation as of 2026-07-28; the distribution is still named gonka-poc,
+# so only the source URL moved.
+ARG GONKA_POC_REPO=gonka-ai/gonka-vllm-plugins
 ARG GONKA_POC_REF=v0.1.0a0
 RUN pip install --no-cache-dir --no-deps \
       "gonka-poc @ git+https://github.com/${GONKA_POC_REPO}@${GONKA_POC_REF}" \
