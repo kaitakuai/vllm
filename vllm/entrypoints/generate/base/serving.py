@@ -256,7 +256,18 @@ class GenerateBaseServing(BaseServing, BeamSearchOnlineMixin):
         tokenizer: TokenizerLike | None,
         return_as_token_id: bool = False,
     ) -> str:
-        return str(token_id)
+        if return_as_token_id:
+            return format_token_id_placeholder(token_id)
+
+        if logprob.decoded_token is not None:
+            return logprob.decoded_token
+
+        if tokenizer is None:
+            raise ValueError(
+                "Unable to get tokenizer because `skip_tokenizer_init=True`"
+            )
+
+        return tokenizer.decode([token_id])
 
 
 def format_token_id_placeholder(token_id: int) -> str:
