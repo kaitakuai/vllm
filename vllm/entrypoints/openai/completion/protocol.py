@@ -35,6 +35,7 @@ from vllm.sampling_params import (
     ThinkingTokenBudget,
 )
 from vllm.utils import random_uuid
+from vllm.validation import EnforcedTokens
 
 logger = init_logger(__name__)
 
@@ -185,6 +186,15 @@ class CompletionRequest(OpenAIBaseModel):
     kv_transfer_params: dict[str, Any] | None = Field(
         default=None,
         description="KVTransfer parameters used for disaggregated serving.",
+    )
+
+    enforced_tokens: EnforcedTokens | None = Field(
+        default=None,
+        description="Enforced token sequence for Gonka validation replay.",
+    )
+    enforced_str: str | None = Field(
+        default=None,
+        description="Enforced output string for Gonka validation replay.",
     )
 
     vllm_xargs: dict[str, str | int | float] | None = Field(
