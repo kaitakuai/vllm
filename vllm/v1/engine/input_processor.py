@@ -91,6 +91,27 @@ class InputProcessor:
             ]
             if not supported_generation_tasks:
                 raise ValueError("This model does not support generation")
+            # The V2 model runner has its own sampler, which does not read
+            # enforced_token_ids or a per-request logprobs_mode. A request
+            # carrying either would be sampled without them and come back
+            # looking ordinary -- a validator would read that reply as a
+            # verified replay when nothing was enforced. Reject it here, in
+            # the frontend, where it is a 400. The same check inside the
+            # worker would kill the engine and every request on it.
+            if self.vllm_config.use_v2_model_runner:
+                if params.enforced_token_ids is not None:
+                    raise ValueError(
+                        "enforced_token_ids is not supported by the V2 model "
+                        "runner. Start the server with "
+                        "VLLM_USE_V2_MODEL_RUNNER=0, or drop the parameter."
+                    )
+                if params.logprobs_mode is not None:
+                    raise ValueError(
+                        "Per-request logprobs_mode is not supported by the V2 "
+                        "model runner. Start the server with "
+                        "VLLM_USE_V2_MODEL_RUNNER=0, or use the engine-level "
+                        "--logprobs-mode."
+                    )
 
             params.verify(
                 self.model_config,

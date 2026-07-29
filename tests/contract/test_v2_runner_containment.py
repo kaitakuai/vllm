@@ -53,3 +53,34 @@ def test_v2_runner_still_separate_sampler() -> None:
         "re-evaluate the containment pin and whether the residual hooks now "
         "cover both runners."
     )
+
+
+def test_v2_runner_rejects_replay_requests_in_the_frontend() -> None:
+    """A replay request must be refused, and refused before it reaches a worker.
+
+    The env pin is a default, not a guarantee: an operator can flip it, and
+    upstream can change what it defaults to. If a replay request does reach a
+    V2 engine, the only safe answer is a rejected request.
+
+    Where the rejection happens matters as much as that it happens. Raising
+    from inside the worker's sampler would surface during execute_model, which
+    the engine treats as a dead engine: it shuts down and takes every other
+    request with it. One bad request would become an outage. So this asserts
+    the check sits in the frontend validation path, where it is a 400.
+    """
+    pytest.importorskip("vllm")
+    from vllm.sampling_params import SamplingParams
+    from vllm.v1.engine.input_processor import InputProcessor
+
+    class _Config:
+        use_v2_model_runner = True
+
+    processor = object.__new__(InputProcessor)
+    processor.vllm_config = _Config()
+
+    for params in (
+        SamplingParams(enforced_token_ids=[1, 2, 3]),
+        SamplingParams(logprobs_mode="raw_logprobs"),
+    ):
+        with pytest.raises(ValueError, match="V2 model runner"):
+            processor._validate_params(params, ("generate",))
