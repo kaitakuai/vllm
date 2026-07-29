@@ -356,6 +356,16 @@ class OpenAIServingChat(GenerateBaseServing):
                         detected = request.enforced_tokens.detect_logprobs_mode()
                         if detected:
                             sampling_params.logprobs_mode = detected
+                            # The mode decides what the returned logprobs mean.
+                            # Inferring it from the shape of the payload rather
+                            # than reading an explicit field makes a wrong guess
+                            # impossible to spot in the response afterwards.
+                            logger.info(
+                                "Request %s: logprobs_mode not supplied, "
+                                "inferred %s from the replay payload",
+                                sub_request_id,
+                                detected,
+                            )
 
             self._log_inputs(
                 sub_request_id,
