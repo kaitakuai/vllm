@@ -976,15 +976,17 @@ class InputBatch:
         batch_mode = self.batch_logprobs_mode
         logprobs_is_processed: torch.Tensor | None = None
         if batch_mode == "mixed":
-            logprobs_is_processed = torch.zeros(
-                num_reqs, dtype=torch.bool, device=self.device
+            # Build on the host and transfer once. Assigning into a device
+            # tensor element by element costs a separate copy plus a sync per
+            # request, and this runs on every step.
+            is_processed = [
+                req_id is not None
+                and self.logprobs_modes.get(req_id) == "processed_logprobs"
+                for req_id in self._req_ids[:num_reqs]
+            ]
+            logprobs_is_processed = torch.tensor(
+                is_processed, dtype=torch.bool, device=self.device
             )
-            for i in range(num_reqs):
-                req_id = self._req_ids[i]
-                if req_id is not None:
-                    logprobs_is_processed[i] = (
-                        self.logprobs_modes.get(req_id) == "processed_logprobs"
-                    )
 
         return SamplingMetadata(
             temperature=temperature,

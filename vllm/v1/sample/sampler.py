@@ -153,9 +153,11 @@ class Sampler(nn.Module):
         # exactly what PoC validation needs to compare against the origin.
         if sampling_metadata.enforced_next_token_ids is not None:
             enforced = sampling_metadata.enforced_next_token_ids
-            mask = enforced != -1
-            if mask.any():
-                sampled[mask] = enforced[mask]
+            # torch.where rather than a masked assignment guarded by
+            # mask.any(): both the guard and boolean-mask indexing force a
+            # device sync, and this runs on every decode step. -1 marks
+            # positions with nothing to enforce.
+            sampled = torch.where(enforced != -1, enforced, sampled)
 
         # Handle logprob_token_ids if specified (more efficient than full vocab)
         # This is used by generative_scoring API to get logprobs for specific tokens
