@@ -321,30 +321,26 @@ class OpenAIServingChat(GenerateBaseServing):
                     self.default_sampling_params,
                 )
                 enforced_ids: list[int] | None = None
-                if request.enforced_str:
-                    enforced_ids = tokenizer.encode(
-                        request.enforced_str, add_special_tokens=False
-                    )
-                elif request.enforced_tokens:
-                    request.enforced_tokens.encode(tokenizer)
-                    enforced_ids = request.enforced_tokens.get_enforced_token_ids()
+                try:
+                    if request.enforced_str:
+                        enforced_ids = tokenizer.encode(
+                            request.enforced_str, add_special_tokens=False
+                        )
+                    elif request.enforced_tokens:
+                        request.enforced_tokens.encode(tokenizer)
+                        enforced_ids = request.enforced_tokens.get_enforced_token_ids()
 
-                if enforced_ids:
-                    # Untrusted input: these ids go straight into an embedding
-                    # lookup, where an out-of-range value is a device-side
-                    # assert that takes the worker down along with every other
-                    # request on it, rather than a rejected request.
-                    try:
+                    if enforced_ids:
                         validate_enforced_token_ids(
                             enforced_ids, self.model_config.get_vocab_size()
                         )
-                    except ValueError as e:
-                        return self.create_error_response(
-                            str(e), param="enforced_tokens"
-                        )
-                    # TokenizerLike types eos_token_id as int, but it is None
-                    # for some models, and a None in the id list fails inside
-                    # the worker instead of failing the request.
+                except ValueError as e:
+                    param = (
+                        "enforced_str" if request.enforced_str else "enforced_tokens"
+                    )
+                    return self.create_error_response(str(e), param=param)
+
+                if enforced_ids:
                     eos_token_id = tokenizer.eos_token_id
                     if eos_token_id is not None and enforced_ids[-1] != eos_token_id:
                         enforced_ids.append(eos_token_id)

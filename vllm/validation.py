@@ -1,22 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
-"""EnforcedToken support for gonka-style inference validation.
-
-A validator replays a previously produced token sequence through this engine
-and compares the resulting logprobs against the originals. The ids arrive in
-the request body, so they are untrusted: they end up in an embedding lookup,
-where an out-of-range value is not a rejected request but a device-side
-assert that takes the worker process -- and every other request on it -- down.
-"""
+"""Enforced-token support for Gonka inference validation."""
 
 from typing import Any
 
 from pydantic import BaseModel, Field
 
-# Ceilings on the replay payload, applied before any of it reaches the engine.
-# They do not bound the request body (that belongs to the proxy), but they do
-# stop a large body from being materialised as a huge number of models, and
-# they keep the per-position fan-out finite.
+# Bound replay work; request-body limits belong to the proxy.
 MAX_ENFORCED_TOKENS = 32768
 MAX_TOP_TOKENS_PER_POSITION = 64
 
@@ -38,8 +28,6 @@ class EnforcedToken(BaseModel):
         except ValueError:
             # Fallback: tokenize the string
             ids = tokenizer.encode(self.token, add_special_tokens=False)
-            # Left unresolved rather than mapped to id 0, which is a real
-            # token and would be indistinguishable downstream.
             self.token_id = ids[0] if ids else None
             self.top_token_ids = []
             for t in self.top_tokens:
@@ -65,14 +53,10 @@ class EnforcedTokens(BaseModel):
         return cls(tokens=tokens)
 
     def get_enforced_token_ids(self) -> list[int]:
-        if not self.tokens:
+        token_ids = [token.token_id for token in self.tokens]
+        if not token_ids or any(token_id is None for token_id in token_ids):
             raise ValueError("Enforced tokens are not encoded")
-        ids = [token.token_id for token in self.tokens]
-        # Every position is checked, not just the first: a single unresolved
-        # token mid-sequence otherwise reaches the worker as None.
-        if any(tid is None for tid in ids):
-            raise ValueError("Enforced tokens are not encoded")
-        return [tid for tid in ids if tid is not None]
+        return [token_id for token_id in token_ids if token_id is not None]
 
     def detect_logprobs_mode(self, threshold: float = 0.10) -> str | None:
         """Classify original inference logprobs mode from top_token_ids.
@@ -101,22 +85,14 @@ class EnforcedTokens(BaseModel):
 
 
 def validate_enforced_token_ids(token_ids: list[int], vocab_size: int) -> None:
-    """Reject replay ids the model cannot embed.
-
-    Raises ``ValueError`` so the caller can return a 400. Without this an
-    out-of-range id reaches the embedding lookup and aborts the worker.
-
-    Negative values are rejected wholesale: the sampler reserves ``-1`` as the
-    "no enforcement at this position" sentinel, so accepting it from a client
-    would silently disable enforcement instead of replaying.
-    """
+    """Reject replay ids that cannot be embedded."""
     for position, token_id in enumerate(token_ids):
-        if not isinstance(token_id, int) or isinstance(token_id, bool):
+        if (
+            isinstance(token_id, bool)
+            or not isinstance(token_id, int)
+            or not 0 <= token_id < vocab_size
+        ):
             raise ValueError(
-                f"enforced token at position {position} is not an integer: {token_id!r}"
-            )
-        if token_id < 0 or token_id >= vocab_size:
-            raise ValueError(
-                f"enforced token at position {position} is out of range for "
-                f"this model: {token_id} not in [0, {vocab_size})"
+                f"invalid enforced token at position {position}: "
+                f"{token_id!r} not in [0, {vocab_size})"
             )
