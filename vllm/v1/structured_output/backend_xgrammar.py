@@ -187,10 +187,7 @@ class XgrammarGrammar(StructuredOutputGrammar):
         Returns the prefix list of tokens that are accepted by the FSM.
         """
         if self._grammar_failed:
-            # The FSM is out of sync with the sequence, so its verdicts are
-            # meaningless: filtering against it would reject every draft token
-            # and drive speculative acceptance to zero. Treat all as accepted,
-            # consistent with grammar being disabled for this request.
+            # A failed matcher must not reject speculative tokens.
             return list(tokens)
         accepted_tokens = []
         for token in tokens:
@@ -212,12 +209,7 @@ class XgrammarGrammar(StructuredOutputGrammar):
 
     def fill_bitmask(self, bitmask: torch.Tensor, idx: int) -> None:
         if self._grammar_failed:
-            # Allow every token rather than returning early. The bitmask is
-            # reused across steps, so leaving this row untouched would apply
-            # whatever mask last occupied it -- in a shared batch, another
-            # request's grammar -- and constrain this request to an unrelated
-            # token set. -1 is all-bits-set, matching how the manager fills
-            # rows for requests that are not grammar-constrained.
+            # Clear the reused row; -1 allows every token.
             bitmask[idx].fill_(-1)
             return
         self.matcher.fill_next_token_bitmask(bitmask, idx)
