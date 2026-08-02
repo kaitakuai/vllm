@@ -116,9 +116,8 @@ class Sampler:
                 # Per-request logprobs mode: row-wise select between two
                 # tensors that both already exist — never a recompute.
                 row_mask = self.replay_state.processed_rows_mask(
-                    idx_mapping_np,
+                    expanded_idx_mapping,
                     self.logprobs_mode == "processed_logprobs",
-                    logits.device,
                 )
                 logits = torch.where(row_mask.unsqueeze(1), processed_logits, logits)
             elif self.logprobs_mode == "processed_logprobs":
