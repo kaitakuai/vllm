@@ -82,3 +82,53 @@ def test_processed_mask_mixes_override_with_engine_default():
         True,
         False,
     ]
+
+
+def test_sampler_calls_replay_methods_with_the_signatures_they_declare():
+    """The sampler's call sites must match ReplayState's signatures.
+
+    Regression: the mode-mask call site passed three positional args to a
+    two-arg method, and passed the host-side index array where the body
+    indexes GPU buffers. Every replay request died with TypeError inside
+    the engine, while the tests above stayed green because they call the
+    methods directly. Signatures alone are checked here — no GPU, no
+    engine — so the mismatch cannot come back unnoticed.
+    """
+    import ast
+    import inspect
+    from pathlib import Path
+
+    from vllm.v1.worker.gpu.sample import replay as replay_mod
+
+    sampler_src = Path(inspect.getfile(replay_mod)).with_name("sampler.py").read_text()
+    tree = ast.parse(sampler_src)
+
+    calls = [
+        node
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and isinstance(node.func.value, ast.Attribute)
+        and node.func.value.attr == "replay_state"
+    ]
+    assert calls, "sampler.py no longer calls replay_state — did the hook move?"
+
+    for call in calls:
+        name = call.func.attr
+        method = getattr(ReplayState, name, None)
+        assert method is not None, f"sampler.py calls ReplayState.{name}, which is gone"
+        params = list(inspect.signature(method).parameters)[1:]  # drop self
+        passed = len(call.args) + len(call.keywords)
+        assert passed <= len(params), (
+            f"sampler.py passes {passed} args to ReplayState.{name}, "
+            f"which declares {len(params)} ({', '.join(params)})"
+        )
+        # Positional args must line up with the declared parameter names:
+        # passing idx_mapping_np where the body indexes GPU buffers is the
+        # exact mistake this guards against.
+        for pos, arg in enumerate(call.args):
+            if isinstance(arg, ast.Name) and params[pos].endswith("idx_mapping"):
+                assert arg.id.endswith("idx_mapping"), (
+                    f"ReplayState.{name} expects {params[pos]!r} at position "
+                    f"{pos}, but sampler.py passes {arg.id!r}"
+                )
