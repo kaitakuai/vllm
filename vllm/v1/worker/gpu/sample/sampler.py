@@ -24,6 +24,7 @@ from vllm.v1.worker.gpu.sample.logprob import (
 )
 from vllm.v1.worker.gpu.sample.output import SamplerOutput, SamplingMaskTensors
 from vllm.v1.worker.gpu.sample.penalties import PenaltiesState
+from vllm.v1.worker.gpu.sample.replay import ReplayState
 from vllm.v1.worker.gpu.sample.states import NO_LOGPROBS, SamplingStates
 from vllm.v1.worker.gpu.sample.thinking_budget import ThinkingBudgetState
 from vllm.v1.worker.gpu.states import RequestState
@@ -54,6 +55,7 @@ class Sampler:
         self.logprob_token_ids_state = LogprobTokenIdsState(max_num_reqs, device)
         self.thinking_budget_state = ThinkingBudgetState(req_states, reasoning_config)
         self.needs_logits_processing = np.zeros(max_num_reqs, dtype=bool)
+        self.replay_state = ReplayState(max_num_reqs, req_states, device)
         self.num_speculative_tokens = num_speculative_tokens
         self.return_sampling_mask = return_sampling_mask
         self.use_flashinfer = (
@@ -85,6 +87,7 @@ class Sampler:
             or states.top_k.np[req_idx] != states.vocab_size
             or states.top_p.np[req_idx] != 1.0
         )
+        self.replay_state.add_request(req_idx, prompt_len, sampling_params)
 
     def apply_staged_writes(self) -> None:
         self.sampling_states.apply_staged_writes()
@@ -128,8 +131,23 @@ class Sampler:
             return_logprobs=return_logprobs,
         )
 
+        # Replay (see replay.py): sampling runs unchanged above so the
+        # logprobs are exactly an ordinary generation's; only the emitted
+        # token is pinned. The host-side guard keeps non-replay batches free.
+        if self.replay_state.batch_has_replay(idx_mapping_np):
+            enforced = self.replay_state.enforced_for_batch(expanded_idx_mapping)
+            sampled = torch.where(enforced != -1, enforced, sampled)
+
         if return_logprobs:
-            if self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
+            if self.replay_state.batch_has_mode_override(idx_mapping_np):
+                # Per-request logprobs mode: row-wise select between two
+                # tensors that both already exist — never a recompute.
+                row_mask = self.replay_state.processed_rows_mask(
+                    expanded_idx_mapping,
+                    self.logprobs_mode == "processed_logprobs",
+                )
+                logits = torch.where(row_mask.unsqueeze(1), processed_logits, logits)
+            elif self.logprobs_mode in PROCESSED_LOGPROBS_MODES:
                 logits = processed_logits
             expanded_logits = logits.shape[0] != idx_mapping_np.shape[0]
             cu_num_logits = cu_num_logits_np.tolist() if expanded_logits else None
