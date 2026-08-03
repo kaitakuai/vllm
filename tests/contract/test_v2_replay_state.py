@@ -114,6 +114,7 @@ def test_sampler_calls_replay_methods_with_the_signatures_they_declare():
     assert calls, "sampler.py no longer calls replay_state — did the hook move?"
 
     for call in calls:
+        assert isinstance(call.func, ast.Attribute)
         name = call.func.attr
         method = getattr(ReplayState, name, None)
         assert method is not None, f"sampler.py calls ReplayState.{name}, which is gone"
