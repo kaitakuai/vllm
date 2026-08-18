@@ -548,6 +548,13 @@ class GPUModelRunner(
         # self.model: nn.Module  # Set after load_model
         # Initialize in initialize_kv_cache
         self.kv_caches: list[torch.Tensor] = []
+        # Gonka: PoC-agnostic pre-forward hooks — called once per engine step
+        # with full step context, right before the forward (same seam as the
+        # KV-connector output context below). Contract for callbacks:
+        # buffer-writes only, branch-free — CUDA-graph capture runs via
+        # _dummy_run and never sees the hooks, so whatever they feed the model
+        # must live in persistent, address-stable buffers.
+        self.pre_forward_hooks: list = []
         # Initialize in initialize_kv_cache_tensors
         self.cross_layers_kv_cache: torch.Tensor | None = None
         self.cross_layers_attn_backend: type[AttentionBackend] | None = None
@@ -4333,6 +4340,9 @@ class GPUModelRunner(
                 num_tokens_unpadded,
                 ubatch_slices_padded,
             )
+        for _pre_forward_hook in self.pre_forward_hooks:
+            _pre_forward_hook(self, scheduler_output, input_ids, positions,
+                              inputs_embeds, attn_metadata)
         with (
             set_forward_context(
                 attn_metadata,
