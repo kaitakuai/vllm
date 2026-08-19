@@ -555,6 +555,11 @@ class GPUModelRunner(
         # _dummy_run and never sees the hooks, so whatever they feed the model
         # must live in persistent, address-stable buffers.
         self.pre_forward_hooks: list = []
+        # Gonka: symmetric post-forward hooks — called once per engine step
+        # right after the forward returns, with the step's hidden states.
+        # On non-last PP ranks hidden is IntermediateTensors — callbacks must
+        # type-check. Same contract as pre_forward_hooks otherwise.
+        self.post_forward_hooks: list = []
         # Initialize in initialize_kv_cache_tensors
         self.cross_layers_kv_cache: torch.Tensor | None = None
         self.cross_layers_attn_backend: type[AttentionBackend] | None = None
@@ -4377,6 +4382,9 @@ class GPUModelRunner(
                 # Common case.
                 hidden_states = model_output
                 aux_hidden_states = None
+
+            for _post_forward_hook in self.post_forward_hooks:
+                _post_forward_hook(self, scheduler_output, hidden_states)
 
             if not self.broadcast_pp_output:
                 # Common case.
