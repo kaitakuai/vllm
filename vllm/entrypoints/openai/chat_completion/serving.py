@@ -329,6 +329,18 @@ class OpenAIServingChat(GenerateBaseServing):
                     enforced_ids = request.enforced_tokens.get_enforced_token_ids()
 
                 if enforced_ids:
+                    # A replay must emit the recorded sequence and nothing past
+                    # it. The appended EOS below guarantees termination, but
+                    # only after one extra token when the recording was itself
+                    # cut short by max_tokens -- so pin the limit to the
+                    # recorded length and stop depending on the validator's
+                    # max_tokens happening to match the executor's.
+                    replay_len = len(enforced_ids)
+                    if (
+                        sampling_params.max_tokens is None
+                        or sampling_params.max_tokens > replay_len
+                    ):
+                        sampling_params.max_tokens = replay_len
                     if enforced_ids[-1] != tokenizer.eos_token_id:
                         enforced_ids.append(tokenizer.eos_token_id)
                     sampling_params.enforced_token_ids = enforced_ids
