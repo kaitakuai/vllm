@@ -2219,6 +2219,23 @@ if hasattr(torch.ops, "_C") and hasattr(torch.ops._C, "fp32_router_gemm"):
         return
 
 
+_moe_topk_extra_cache: dict[str, tuple] = {}
+
+
+def _moe_topk_extra(op_name: str) -> tuple:
+    """Trailing args newer _moe_C binaries require but this source predates
+    (prebuilt-wheel venvs): `routed_scaling_factor` (1.0 = no scaling; callers
+    here scale outside the op) and `is_padding` (None). Probed from the
+    installed op's schema so both matched and skewed builds work."""
+    extra = _moe_topk_extra_cache.get(op_name)
+    if extra is None:
+        schema = str(getattr(torch.ops._moe_C, op_name).default._schema)
+        extra = (("routed_scaling_factor" in schema) and (1.0,) or ()) + (
+            ("is_padding" in schema) and (None,) or ())
+        _moe_topk_extra_cache[op_name] = extra
+    return extra
+
+
 def topk_softmax(
     topk_weights: torch.Tensor,
     topk_ids: torch.Tensor,
@@ -2234,6 +2251,7 @@ def topk_softmax(
         gating_output,
         renormalize,
         e_score_correction_bias,
+        *_moe_topk_extra("topk_softmax"),
     )
 
 
@@ -2252,6 +2270,7 @@ def topk_sigmoid(
         gating_output,
         renormalize,
         e_score_correction_bias,
+        *_moe_topk_extra("topk_sigmoid"),
     )
 
 
