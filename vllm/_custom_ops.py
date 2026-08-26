@@ -2231,7 +2231,8 @@ def _moe_topk_extra(op_name: str) -> tuple:
     if extra is None:
         schema = str(getattr(torch.ops._moe_C, op_name).default._schema)
         extra = (("routed_scaling_factor" in schema) and (1.0,) or ()) + (
-            ("is_padding" in schema) and (None,) or ())
+            ("is_padding" in schema) and (None,) or ()
+        )
         _moe_topk_extra_cache[op_name] = extra
     return extra
 

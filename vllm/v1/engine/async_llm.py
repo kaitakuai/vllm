@@ -303,8 +303,7 @@ class AsyncLLM(EngineClient):
 
         if poc_params is not None:
             # PoC emits its artifact ONCE: a single finished output (0.20 path).
-            queue = RequestOutputCollector(
-                RequestOutputKind.FINAL_ONLY, request_id)
+            queue = RequestOutputCollector(RequestOutputKind.FINAL_ONLY, request_id)
             request = EngineCoreRequest(
                 request_id=request_id,
                 # Dummy tokens (seq_len): PoC rides the graphed input_ids path;
@@ -313,8 +312,7 @@ class AsyncLLM(EngineClient):
                 mm_features=None,
                 sampling_params=None,
                 pooling_params=None,
-                arrival_time=arrival_time if arrival_time is not None
-                else time.time(),
+                arrival_time=arrival_time if arrival_time is not None else time.time(),
                 lora_request=lora_request,
                 # Unique salt: dummy prompts are identical across nonces;
                 # prefix-cache hits would share KV between nonces.
@@ -589,6 +587,7 @@ class AsyncLLM(EngineClient):
                 raise ValueError("poc_params cannot be used with a prompt")
             if request_id is None:
                 import uuid
+
                 request_id = f"poc-{uuid.uuid4()}"
 
         try:

@@ -238,6 +238,7 @@ class RequestState:
         elif getattr(request, "poc_params", None) is not None:
             # PoC: no sampling/pooling; emits a single final RequestOutput.
             from vllm.sampling_params import RequestOutputKind
+
             logprobs_processor = None
             detokenizer = None
             max_tokens_param = None
@@ -629,7 +630,9 @@ class OutputProcessor:
             pooling_output = engine_core_output.pooling_output
             poc_output = getattr(engine_core_output, "poc_output", None)
             if poc_output is not None:
-                request_output = RequestOutput(
+                # Annotated so the walrus below, which also admits
+                # PoolingRequestOutput and None, does not narrow to this branch.
+                poc_request_output = RequestOutput(
                     request_id=req_id,
                     prompt=None,
                     prompt_token_ids=[],
@@ -639,9 +642,9 @@ class OutputProcessor:
                     poc_output=poc_output,
                 )
                 if req_state.queue is not None:
-                    req_state.queue.put(request_output)
+                    req_state.queue.put(poc_request_output)
                 else:
-                    request_outputs.append(request_output)
+                    request_outputs.append(poc_request_output)
                 self._finish_request(req_state)
                 continue
             finish_reason = engine_core_output.finish_reason

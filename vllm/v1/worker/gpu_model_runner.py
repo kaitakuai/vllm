@@ -4089,6 +4089,7 @@ class GPUModelRunner(
         # PoC mixed-batch bridge (no-op when the step holds no PoC rows).
         if getattr(self, "_poc_bridge", None) is None:
             from gonka_poc.mixed.bridge import PoCRunnerBridge
+
             self._poc_bridge = PoCRunnerBridge(self)
 
         # If ngram_gpu is used, we need to copy the scheduler_output to avoid
@@ -4319,7 +4320,8 @@ class GPUModelRunner(
             # After _update_states: requests are registered.
             self._poc_bridge.pre_step(scheduler_output)
             self._poc_bridge.pre_forward(
-                scheduler_output, positions,
+                scheduler_output,
+                positions,
                 scheduler_output.total_num_scheduled_tokens,
             )
 
@@ -4428,11 +4430,11 @@ class GPUModelRunner(
                     logits = None
                 else:
                     logits = (
-                    self._poc_bridge.compute_logits(sample_hidden_states)
-                    if getattr(self, "_poc_bridge", None) is not None
-                    and self._poc_bridge.mixed_active()
-                    else self.model.compute_logits(sample_hidden_states)
-                )
+                        self._poc_bridge.compute_logits(sample_hidden_states)
+                        if getattr(self, "_poc_bridge", None) is not None
+                        and self._poc_bridge.mixed_active()
+                        else self.model.compute_logits(sample_hidden_states)
+                    )
 
                 model_output_broadcast_data: dict[str, Any] = {}
                 if logits is not None:

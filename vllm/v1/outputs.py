@@ -228,15 +228,18 @@ class ECConnectorOutput:
     finished_recving: set[str] | None = None
 
 
-
 @dataclass
 class PoCOutput:
     nonce: int
     vector_b64: str
     # Optional – populated only when the runner is asked to expose internals
-    hidden_state_b64: str | None = None           # full normalised last-token hidden state
-    reduced_hidden_state_b64: str | None = None   # SPHERE_DIM-D slice on unit sphere (prefill)
-    reduced_hidden_state_decode_b64: list[str] = field(default_factory=list)  # per decode step
+    hidden_state_b64: str | None = None  # full normalised last-token hidden state
+    reduced_hidden_state_b64: str | None = (
+        None  # SPHERE_DIM-D slice on unit sphere (prefill)
+    )
+    reduced_hidden_state_decode_b64: list[str] = field(
+        default_factory=list
+    )  # per decode step
     # Decode-mode statistics: sphere_k chosen at each step (the codebook index on
     # the sphere). Index 0 = prefill, indices 1..N = decode steps. The prefill k is
     # k_points_steps[0] (the dropped scalar sphere_k field was just this).

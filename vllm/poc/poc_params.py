@@ -1,12 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 from dataclasses import dataclass, field
-from typing import List, Optional
 
 
 @dataclass
 class PoCParams:
     """Parameters for a single PoC nonce request."""
+
     block_hash: str
     public_key: str
     block_height: int
@@ -14,8 +14,8 @@ class PoCParams:
     seq_len: int = 256
     k_dim: int = 12
     # Decode-mode parameters (enabled by --poc-decode server flag)
-    poc_decode: bool = False   # run decode steps after prefill
-    max_tokens: int = 0        # number of decode steps (0 = prefill-only)
+    poc_decode: bool = False  # run decode steps after prefill
+    max_tokens: int = 0  # number of decode steps (0 = prefill-only)
     # Validation mode: when set, this request tracks deviations from an
     # inference run instead of freely generating its own k-id sequence.
     # The list contains k_points_steps from the reference inference run
@@ -23,7 +23,7 @@ class PoCParams:
     # server computes its own k-id, compares against the reference, and uses
     # the reference k-id to seed the *next* decode embedding so that both
     # servers always run the same forward pass regardless of local deviations.
-    enforced_k_steps: Optional[List[int]] = field(default=None, repr=False)
+    enforced_k_steps: list[int] | None = field(default=None, repr=False)
     # Debug mode: collect per-step sphere indices and values for mismatch analysis.
     debug: bool = False
     # Per-nonce Householder seeding: reflection vectors are seeded by
@@ -50,7 +50,8 @@ class PoCParams:
             max_tokens=self.max_tokens,
             enforced_k_steps=(
                 list(self.enforced_k_steps)
-                if self.enforced_k_steps is not None else None
+                if self.enforced_k_steps is not None
+                else None
             ),
             debug=self.debug,
             per_nonce_reflection=self.per_nonce_reflection,

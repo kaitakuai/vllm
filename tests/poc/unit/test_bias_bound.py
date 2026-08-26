@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+# SPDX-FileCopyrightText: Copyright contributors to the vLLM project
 """Real e_score_correction_bias magnitudes vs the grouped-forcing bound.
 
 The forcing formula assigns chosen experts logits top_k..1; under sigmoid
@@ -16,9 +17,8 @@ separability — see PR #2); the engine's selection over the forced ladder
 is again the production path, so these bounds GATE CORRECTNESS on every
 model whose scoring adds e_score_correction_bias.
 """
-import math
 
-import pytest
+import math
 
 SIGMOID_GAP = 1.0 / (1.0 + math.exp(-1.0))  # sigmoid(min forced value = 1)
 

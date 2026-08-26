@@ -298,9 +298,12 @@ def build_app(
     from gonka_poc.poc.routes import router as poc_router
 
     for _poc_route in poc_router.routes:
-        app.add_api_route(_poc_route.path, _poc_route.endpoint,
-                          methods=list(_poc_route.methods),
-                          name=_poc_route.name)
+        app.add_api_route(
+            _poc_route.path,
+            _poc_route.endpoint,
+            methods=list(_poc_route.methods),
+            name=_poc_route.name,
+        )
     app.state.poc_enabled = True
     # Decode-PoC is the canonical scheme; per-request max_tokens still
     # selects prefill-only (max_tokens == 0).

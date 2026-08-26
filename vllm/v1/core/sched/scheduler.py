@@ -7,6 +7,8 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+from gonka_poc.mixed.admission import PoCAdmission
+
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -38,8 +40,6 @@ from vllm.v1.core.kv_cache_coordinator import HybridKVCacheCoordinator
 from vllm.v1.core.kv_cache_manager import KVCacheBlocks, KVCacheManager
 from vllm.v1.core.kv_cache_metrics import KVCacheMetricsCollector
 from vllm.v1.core.kv_cache_utils import KVCacheBlock
-from gonka_poc.mixed.admission import PoCAdmission
-
 from vllm.v1.core.sched.interface import PauseState, SchedulerInterface
 from vllm.v1.core.sched.output import (
     CachedRequestData,
@@ -1140,8 +1140,11 @@ class Scheduler(SchedulerInterface):
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             poc_req_ids={
                 r.request_id
-                for reqs in (scheduled_new_reqs, scheduled_resumed_reqs,
-                             scheduled_running_reqs)
+                for reqs in (
+                    scheduled_new_reqs,
+                    scheduled_resumed_reqs,
+                    scheduled_running_reqs,
+                )
                 for r in reqs
                 if r.poc_params is not None
             }
@@ -1628,17 +1631,14 @@ class Scheduler(SchedulerInterface):
                     "nonce": poc_obj.nonce,
                     "vector_b64": poc_obj.vector_b64,
                     "hidden_state_b64": poc_obj.hidden_state_b64,
-                    "reduced_hidden_state_b64":
-                        poc_obj.reduced_hidden_state_b64,
+                    "reduced_hidden_state_b64": poc_obj.reduced_hidden_state_b64,
                     "reduced_hidden_state_decode_b64": getattr(
-                        poc_obj, "reduced_hidden_state_decode_b64", []),
+                        poc_obj, "reduced_hidden_state_decode_b64", []
+                    ),
                     "k_points_steps": getattr(poc_obj, "k_points_steps", []),
-                    "n_sphere_mismatches": getattr(
-                        poc_obj, "n_sphere_mismatches", -1),
-                    "sph_indices_steps": getattr(
-                        poc_obj, "sph_indices_steps", []),
-                    "sph_values_steps": getattr(
-                        poc_obj, "sph_values_steps", []),
+                    "n_sphere_mismatches": getattr(poc_obj, "n_sphere_mismatches", -1),
+                    "sph_indices_steps": getattr(poc_obj, "sph_indices_steps", []),
+                    "sph_values_steps": getattr(poc_obj, "sph_values_steps", []),
                 }
                 request.status = RequestStatus.FINISHED_STOPPED
                 self._free_request(request)
@@ -1651,7 +1651,8 @@ class Scheduler(SchedulerInterface):
                         poc_output=poc_payload,
                         events=request.take_events(),
                         trace_headers=request.trace_headers,
-                    ))
+                    )
+                )
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]

@@ -28,7 +28,6 @@ import torch
 import torch.nn as nn
 
 import vllm.envs as envs
-from vllm.sampling_params import SamplingParams
 from vllm.compilation.counter import compilation_counter
 from vllm.config import VllmConfig
 from vllm.config.compilation import CUDAGraphMode
@@ -44,6 +43,7 @@ from vllm.model_executor.layers.mamba.ops.ssu_dispatch import (
 )
 from vllm.model_executor.model_loader import get_model_loader
 from vllm.multimodal import MULTIMODAL_REGISTRY
+from vllm.sampling_params import SamplingParams
 from vllm.sequence import IntermediateTensors
 from vllm.tasks import SupportedTask
 from vllm.utils.math_utils import cdiv
@@ -818,8 +818,10 @@ class GPUModelRunner(LoRAModelRunnerMixin):
                     self.prompt_logprobs_worker.clear_slot(req_index)
                 if self.sampler is not None:
                     self.sampler.add_request(
-                        req_index, prompt_len,
-                        SamplingParams(temperature=0.0, max_tokens=1))
+                        req_index,
+                        prompt_len,
+                        SamplingParams(temperature=0.0, max_tokens=1),
+                    )
 
         if scheduler_output.scheduled_new_reqs:
             self.req_states.apply_staged_writes()
@@ -1306,9 +1308,11 @@ class GPUModelRunner(LoRAModelRunnerMixin):
         if getattr(self, "_poc_bridge", None) is not None:
             self._poc_bridge.pre_step(scheduler_output)
             self._poc_bridge.pre_forward(
-                scheduler_output, input_batch.positions,
+                scheduler_output,
+                input_batch.positions,
                 scheduler_output.total_num_scheduled_tokens,
-                batch_view=(input_batch.num_reqs, input_batch.req_ids))
+                batch_view=(input_batch.num_reqs, input_batch.req_ids),
+            )
 
         if batch_desc.cg_mode == CUDAGraphMode.FULL:
             # Use explicit cudagraph replay for FULL mode.
