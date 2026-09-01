@@ -7,6 +7,8 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+from gonka_poc.mixed.admission import PoCAdmission
+
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -52,7 +54,12 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -514,6 +521,8 @@ class Scheduler(SchedulerInterface):
 
         self.kv_cache_manager.new_step_starts()
 
+        poc = PoCAdmission(self, token_budget)
+
         # DP prefill balancing: on a throttled (non-cadence-aligned) step, defer
         # all prefill compute unless saturated.
         defer_prefills = (
@@ -528,7 +537,8 @@ class Scheduler(SchedulerInterface):
                 break
 
             if (
-                request.num_output_placeholders > 0
+                request.poc_params is None
+                and request.num_output_placeholders > 0
                 # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).
                 # Since output placeholders are also included in the computed tokens
                 # count, we subtract (num_output_placeholders - 1) to remove any draft
@@ -552,6 +562,10 @@ class Scheduler(SchedulerInterface):
             if defer_prefills and request.is_prefill_chunk:
                 # DP prefill balancing: defer this in-progress prefill chunk to a
                 # cadence-aligned step; decodes still run to fill this step.
+                req_index += 1
+                continue
+
+            if poc.skip(request):
                 req_index += 1
                 continue
 
@@ -605,6 +619,11 @@ class Scheduler(SchedulerInterface):
                 request, request.num_computed_tokens, num_new_tokens
             )
 
+            num_new_tokens = poc.num_tokens(request, num_new_tokens)
+            if poc.over_budget(request, num_new_tokens):
+                req_index += 1
+                continue
+
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
                 # reasons:
@@ -630,7 +649,7 @@ class Scheduler(SchedulerInterface):
                 while True:
                     new_blocks = self.kv_cache_manager.allocate_slots(
                         request,
-                        num_new_tokens,
+                        poc.alloc_tokens(request, num_new_tokens),
                         num_lookahead_tokens=self.num_lookahead_tokens,
                     )
 
@@ -699,6 +718,7 @@ class Scheduler(SchedulerInterface):
             num_scheduled_tokens[request_id] = num_new_tokens
             token_budget -= num_new_tokens
             input_budget -= num_new_tokens + draft_slots
+            poc.note_scheduled(request, num_new_tokens)
             req_index += 1
 
             # Speculative decode related.
@@ -762,6 +782,11 @@ class Scheduler(SchedulerInterface):
 
                 request = request_queue.peek_request()
                 request_id = request.request_id
+
+                if poc.skip(request):
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
 
                 # try to promote blocked statuses while traversing skipped queue.
                 if self._is_blocked_waiting_status(
@@ -1002,6 +1027,12 @@ class Scheduler(SchedulerInterface):
                         # The request cannot be scheduled.
                         break
 
+                num_new_tokens = poc.num_tokens(request, num_new_tokens)
+                if poc.over_budget(request, num_new_tokens):
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
+
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
                 # mismatching local and remote block counts.
@@ -1032,7 +1063,7 @@ class Scheduler(SchedulerInterface):
 
                 new_blocks = self.kv_cache_manager.allocate_slots(
                     request,
-                    num_new_tokens,
+                    poc.alloc_tokens(request, num_new_tokens),
                     num_new_computed_tokens=num_new_local_computed_tokens,
                     new_computed_blocks=new_computed_blocks,
                     num_lookahead_tokens=effective_lookahead_tokens,
@@ -1132,6 +1163,7 @@ class Scheduler(SchedulerInterface):
                 num_scheduled_tokens[request_id] = num_new_tokens
                 token_budget -= num_new_tokens
                 input_budget -= num_new_tokens + draft_slots
+                poc.note_scheduled(request, num_new_tokens)
                 request.status = RequestStatus.RUNNING
                 request.num_computed_tokens = num_computed_tokens
                 if pad_spec_decode:
@@ -1288,6 +1320,18 @@ class Scheduler(SchedulerInterface):
             partial_tail_offloads=pending_partial_tail_offloads,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
             ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
+            poc_req_ids={
+                r.request_id
+                for reqs in (
+                    scheduled_new_reqs,
+                    scheduled_resumed_reqs,
+                    scheduled_running_reqs,
+                )
+                for r in reqs
+                if r.poc_params is not None
+            }
+            if poc.active
+            else None,
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1820,6 +1864,42 @@ class Scheduler(SchedulerInterface):
 
             # Drop-mode stale output (same-step resume) is discarded entirely.
             if output_is_stale and request.drop_stale_output:
+                continue
+
+            if request.poc_params is not None:
+                # PoC finish = artifact presence (emit-once).
+                if request.num_output_placeholders > 0:
+                    request.num_output_placeholders -= 1
+                poc_outputs = getattr(model_runner_output, "poc_outputs", None)
+                poc_obj = poc_outputs.get(req_id) if poc_outputs else None
+                if poc_obj is None:
+                    continue
+                poc_payload = {
+                    "nonce": poc_obj.nonce,
+                    "vector_b64": poc_obj.vector_b64,
+                    "hidden_state_b64": poc_obj.hidden_state_b64,
+                    "reduced_hidden_state_b64": poc_obj.reduced_hidden_state_b64,
+                    "reduced_hidden_state_decode_b64": getattr(
+                        poc_obj, "reduced_hidden_state_decode_b64", []
+                    ),
+                    "k_points_steps": getattr(poc_obj, "k_points_steps", []),
+                    "n_sphere_mismatches": getattr(poc_obj, "n_sphere_mismatches", -1),
+                    "sph_indices_steps": getattr(poc_obj, "sph_indices_steps", []),
+                    "sph_values_steps": getattr(poc_obj, "sph_values_steps", []),
+                }
+                request.status = RequestStatus.FINISHED_STOPPED
+                self._free_request(request)
+                stopped_running_reqs.add(request)
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=[],
+                        finish_reason=FinishReason.STOP,
+                        poc_output=poc_payload,
+                        events=request.take_events(),
+                        trace_headers=request.trace_headers,
+                    )
+                )
                 continue
 
             req_index = model_runner_output.req_id_to_index[req_id]
