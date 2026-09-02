@@ -1638,6 +1638,7 @@ class Scheduler(SchedulerInterface):
                     "k_points_steps": getattr(poc_obj, "k_points_steps", []),
                     "n_sphere_mismatches": getattr(poc_obj, "n_sphere_mismatches", -1),
                     "n_nan_steps": getattr(poc_obj, "n_nan_steps", 0),
+                    "mismatch_margin_max": getattr(poc_obj, "mismatch_margin_max", 0.0),
                     "sph_indices_steps": getattr(poc_obj, "sph_indices_steps", []),
                     "sph_values_steps": getattr(poc_obj, "sph_values_steps", []),
                 }
