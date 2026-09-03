@@ -328,6 +328,11 @@ class PoCOutput:
     # FAULT (GPU contention / kernel fault), NOT fraud. Excluded from
     # n_sphere_mismatches; >0 means the trajectory is suspect and should be re-run.
     n_nan_steps: int = 0
+    # Validation mode only: the largest snap margin among the steps that
+    # disagreed with the reference (0.0 when none did). A nonce-level statistic:
+    # the validator flags a nonce when it disagrees somewhere with a margin
+    # above its threshold, instead of gating every step by a fixed tau.
+    mismatch_margin_max: float = 0.0
     # Per-step sphere slices, index 0 = prefill, 1..N = decode steps. Emitted
     # under debug (full trajectory, full SPHERE_DIM) or poc_vector_artifacts
     # (every step, a seeded k_dim-coord pick of the SPHERE_DIM vector).
