@@ -191,9 +191,11 @@ class CacheConfig:
     KV offloading is only activated when kv_offloading_size is set."""
 
     poc_max_batch_size: int = Field(default=0, ge=0)
-    """Maximum number of PoC nonces scheduled into a single forward pass.
-    0 = AUTO: resolved to max_num_seqs in VllmConfig.__post_init__ so PoC scales
-    with the machine's own concurrency limit. Set >0 to override."""
+    """Decode-state slots for PoC nonces in the model runner. 0 = AUTO: the
+    plugin sizes the pool by max_num_seqs, which vLLM never exceeds, so the
+    pool cannot run out. Scheduling itself is vLLM's: PoC rows are admitted,
+    budgeted and preempted like chat (plugin ADR-0017); the node bounds a round's
+    concurrency on the client side."""
 
     poc_seq_len: int = Field(default=256, gt=0)
     """Input sequence length for PoC forward passes. Must match the seq_len used
@@ -206,10 +208,6 @@ class CacheConfig:
     """Emit pre-snap sphere vectors in PoC artifacts without ``debug``: one
     vector per step, each a seeded ``k_dim``-coordinate pick of the SPHERE_DIM
     unit vector. Emission only — forward, chain and verdict are unchanged."""
-
-    poc_share: float = Field(default=0.5, ge=0.0, le=1.0)
-    """Fraction of each scheduler step's token budget PoC may consume; chat gets
-    the rest. 1.0 = PoC greedy, 0.0 = chat only. Prevents PoC starving chat."""
 
     def compute_hash(self) -> str:
         """
@@ -244,11 +242,10 @@ class CacheConfig:
             "kv_cache_max_concurrency",
             # WIP feature toggle not impacting compiled graph shape
             "kv_sharing_fast_prefill",
-            # PoC batch/budget knobs — affect scheduling but not graph shape
+            # PoC knobs — affect the decode-state pool and the synthetic prompt, not graph shape
             "poc_max_batch_size",
             "poc_seq_len",
             "poc_max_tokens",
-            "poc_share",
             # PoC artifact-emission knobs — post-forward host-side emission only
             "poc_vector_artifacts",
         }
