@@ -1127,19 +1127,6 @@ class Scheduler(SchedulerInterface):
             free_encoder_mm_hashes=self.encoder_cache_manager.get_freed_mm_hashes(),
             new_block_ids_to_zero=new_block_ids_to_zero,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
-            poc_req_ids=(
-                {
-                    r.request_id
-                    for reqs in (
-                        scheduled_new_reqs,
-                        scheduled_resumed_reqs,
-                        scheduled_running_reqs,
-                    )
-                    for r in reqs
-                    if r.poc_params is not None
-                }
-                or None
-            ),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
