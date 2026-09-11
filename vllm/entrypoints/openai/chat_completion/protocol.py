@@ -485,6 +485,14 @@ class ChatCompletionRequest(OpenAIBaseModel):
             "ECTransfer parameters used for encoder-cache disaggregated serving."
         ),
     )
+    enforced_tokens: EnforcedTokens | None = Field(
+        default=None,
+        description="Enforced token sequence for Gonka validation replay.",
+    )
+    enforced_str: str | None = Field(
+        default=None,
+        description="Enforced output string for Gonka validation replay.",
+    )
 
     enforced_tokens: EnforcedTokens | None = Field(
         default=None,

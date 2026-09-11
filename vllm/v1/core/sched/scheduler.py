@@ -7,6 +7,8 @@ from collections.abc import Iterable
 from dataclasses import replace
 from typing import Any
 
+from gonka_poc.mixed.admission import poc_step_tokens
+
 from vllm.compilation.cuda_graph import CUDAGraphStat
 from vllm.config import KVEventsConfig, VllmConfig
 from vllm.distributed.ec_transfer.ec_connector.base import (
@@ -52,7 +54,12 @@ from vllm.v1.core.sched.request_queue import (
     create_request_queue,
 )
 from vllm.v1.core.sched.utils import check_stop, remove_all
-from vllm.v1.engine import EngineCoreEventType, EngineCoreOutput, EngineCoreOutputs
+from vllm.v1.engine import (
+    EngineCoreEventType,
+    EngineCoreOutput,
+    EngineCoreOutputs,
+    FinishReason,
+)
 from vllm.v1.kv_cache_interface import KVCacheConfig
 from vllm.v1.metrics.perf import ModelMetrics, PerfStats
 from vllm.v1.metrics.stats import PrefixCacheStats, SchedulerStats
@@ -497,7 +504,8 @@ class Scheduler(SchedulerInterface):
                 break
 
             if (
-                request.num_output_placeholders > 0
+                request.poc_params is None
+                and request.num_output_placeholders > 0
                 # This is (num_computed_tokens + 1) - (num_output_placeholders - 1).
                 # Since output placeholders are also included in the computed tokens
                 # count, we subtract (num_output_placeholders - 1) to remove any draft
@@ -567,6 +575,12 @@ class Scheduler(SchedulerInterface):
                     encoder_compute_budget,
                     shift_computed_tokens=1 if self.use_eagle else 0,
                 )
+
+            # PoC row: atomic prefill (all of seq_len or wait), one token per decode step.
+            num_new_tokens = poc_step_tokens(request, num_new_tokens, token_budget)
+            if num_new_tokens == 0 and request.poc_params is not None:
+                req_index += 1
+                continue
 
             if num_new_tokens == 0:
                 # The request cannot be scheduled because one of the following
@@ -963,6 +977,13 @@ class Scheduler(SchedulerInterface):
                             # The request cannot be scheduled.
                             break
 
+                # PoC row: atomic prefill (all of seq_len or wait for a later step).
+                num_new_tokens = poc_step_tokens(request, num_new_tokens, token_budget)
+                if num_new_tokens == 0 and request.poc_params is not None:
+                    request_queue.pop_request()
+                    step_skipped_waiting.prepend_request(request)
+                    continue
+
                 # During async KV load, no forward pass is run yet.
                 # Allocate speculative lookahead slots later to avoid
                 # mismatching local and remote block counts.
@@ -1248,7 +1269,6 @@ class Scheduler(SchedulerInterface):
             kv_cache_block_copies=pending_kv_cache_block_copies,
             partial_tail_offloads=pending_partial_tail_offloads,
             num_spec_tokens_to_schedule=num_spec_tokens_to_schedule,
-            ec_manager_metadata=self.encoder_cache_manager.get_manager_metadata(),
         )
 
         # NOTE(Kuntai): this function is designed for multiple purposes:
@@ -1781,6 +1801,46 @@ class Scheduler(SchedulerInterface):
 
             # Drop-mode stale output (same-step resume) is discarded entirely.
             if output_is_stale and request.drop_stale_output:
+                continue
+
+            if request.poc_params is not None:
+                # PoC finish = artifact presence (emit-once).
+                if request.num_output_placeholders > 0:
+                    request.num_output_placeholders -= 1
+                poc_outputs = getattr(model_runner_output, "poc_outputs", None)
+                poc_obj = poc_outputs.get(req_id) if poc_outputs else None
+                if poc_obj is None:
+                    continue
+                poc_payload = {
+                    "nonce": poc_obj.nonce,
+                    "vector_b64": poc_obj.vector_b64,
+                    "hidden_state_b64": poc_obj.hidden_state_b64,
+                    "reduced_hidden_state_b64": poc_obj.reduced_hidden_state_b64,
+                    "reduced_hidden_state_decode_b64": getattr(
+                        poc_obj, "reduced_hidden_state_decode_b64", []
+                    ),
+                    "k_points_steps": getattr(poc_obj, "k_points_steps", []),
+                    "n_sphere_mismatches": getattr(poc_obj, "n_sphere_mismatches", -1),
+                    "sph_indices_steps": getattr(poc_obj, "sph_indices_steps", []),
+                    "sph_values_steps": getattr(poc_obj, "sph_values_steps", []),
+                    "n_nan_steps": getattr(poc_obj, "n_nan_steps", 0),
+                    "mismatch_margin_max": getattr(
+                        poc_obj, "mismatch_margin_max", 0.0
+                    ),
+                }
+                request.status = RequestStatus.FINISHED_STOPPED
+                self._free_request(request)
+                stopped_running_reqs.add(request)
+                outputs[request.client_index].append(
+                    EngineCoreOutput(
+                        request_id=req_id,
+                        new_token_ids=[],
+                        finish_reason=FinishReason.STOP,
+                        poc_output=poc_payload,
+                        events=request.take_events(),
+                        trace_headers=request.trace_headers,
+                    )
+                )
                 continue
 
             req_index = model_runner_output.req_id_to_index.get(req_id)
