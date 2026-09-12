@@ -83,8 +83,13 @@ def test_sampling_params_has_poc_fields() -> None:
     assert params.enforced_token_ids == [7, 11]
 
     # The value check runs from __post_init__; without it an unusable mode
-    # reaches the sampler and is resolved to the deployment default.
-    with pytest.raises(ValueError):
+    # reaches the sampler and is resolved to the deployment default. The base
+    # raises its own VLLMValidationError, which is not a ValueError.
+    try:
+        from vllm.exceptions import VLLMValidationError as _Invalid
+    except ImportError:  # pre-0.28 trees raise a plain ValueError
+        _Invalid = ValueError
+    with pytest.raises((_Invalid, ValueError)):
         cls(logprobs_mode="not_a_mode")
 
 
