@@ -667,6 +667,19 @@ class Scheduler(SchedulerInterface):
                 req_index += 1
                 continue
 
+            # A replay must not speculate: RejectionSampler has no enforced-token
+            # hook, and an accepted draft books two emitted tokens while the reply
+            # carries one. A PoC row must not either: it takes one token per step
+            # and its next input comes from its own trajectory. Async scheduling
+            # hands every row placeholder drafts after each step, so drop them
+            # BEFORE the token count below: counted drafts schedule positions that
+            # are never verified, num_computed_tokens runs ahead of the request's
+            # block hashes, and cache_full_blocks fails with IndexError.
+            if request.spec_token_ids and (
+                _replays_enforced_tokens(request) or request.poc_params is not None
+            ):
+                request.spec_token_ids = []
+
             num_new_tokens = (
                 request.num_tokens_with_spec
                 + request.num_output_placeholders
@@ -718,8 +731,11 @@ class Scheduler(SchedulerInterface):
             )
 
             # PoC row: atomic prefill (all of seq_len or wait), one token per
-            # decode step.
-            num_new_tokens = poc_step_tokens(request, num_new_tokens, token_budget)
+            # decode step. The prefill must fit the budget chat rows get,
+            # including the draft-model slots reserved per scheduled request.
+            num_new_tokens = poc_step_tokens(
+                request, num_new_tokens, min(token_budget, input_budget - draft_slots)
+            )
             if num_new_tokens == 0 and request.poc_params is not None:
                 req_index += 1
                 continue
@@ -830,12 +846,6 @@ class Scheduler(SchedulerInterface):
             req_index += 1
 
             # Speculative decode related.
-            # A replay must not speculate: RejectionSampler has no
-            # enforced-token hook, and an accepted draft books two emitted
-            # tokens while the reply carries one, so the replay index runs
-            # ahead of the output.
-            if request.spec_token_ids and _replays_enforced_tokens(request):
-                request.spec_token_ids = []
             if request.spec_token_ids:
                 num_scheduled_spec_tokens = (
                     num_new_tokens
@@ -1076,6 +1086,9 @@ class Scheduler(SchedulerInterface):
                         and not prefill_scheduled
                         and (scheduled_running_reqs or num_computed_tokens > 0)
                         and not _replays_enforced_tokens(request)
+                        # A decoding PoC row takes exactly one token per step
+                        # (poc_step_tokens), so it is never padded to the spec size.
+                        and request.poc_params is None
                     ):
                         padded_num_tokens = 1 + self.num_spec_tokens
                         # Pad only when there is room for the sampled token(s).
@@ -1156,8 +1169,11 @@ class Scheduler(SchedulerInterface):
                         # The request cannot be scheduled.
                         break
 
-                # PoC row: atomic prefill (all of seq_len or wait for a later step).
-                num_new_tokens = poc_step_tokens(request, num_new_tokens, token_budget)
+                # PoC row: atomic prefill (all of seq_len or wait for a later step),
+                # bounded like chat rows by the draft-model slots reserved per request.
+                num_new_tokens = poc_step_tokens(
+                    request, num_new_tokens, min(token_budget, input_budget - draft_slots)
+                )
                 if num_new_tokens == 0 and request.poc_params is not None:
                     request_queue.pop_request()
                     step_skipped_waiting.prepend_request(request)
