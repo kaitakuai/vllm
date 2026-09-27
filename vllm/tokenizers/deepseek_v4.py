@@ -27,12 +27,13 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
             tools: list[dict[str, Any]] | None = None,
             **kwargs,
         ) -> str | list[int]:
-            thinking = kwargs.get("thinking")
-            enable_thinking = kwargs.get("enable_thinking")
-            thinking_enabled = bool(thinking) or bool(enable_thinking)
-            if "thinking" not in kwargs and "enable_thinking" not in kwargs:
-                thinking_enabled = True
-            thinking_mode = "thinking" if thinking_enabled else "chat"
+            # Render exactly as the vLLM 0.25.1 DeepSeek-V4 tokenizer that validators
+            # replay with: thinking is off unless the request turns it on, and its
+            # reasoning-effort levels map onto this encoder's keys below.
+            thinking = kwargs.get("thinking", False)
+            enable_thinking = kwargs.get("enable_thinking", False)
+            thinking = thinking or enable_thinking
+            thinking_mode = "thinking" if thinking else "chat"
 
             conversation = kwargs.get("conversation", messages)
             messages = conversation.copy()
@@ -40,18 +41,19 @@ def get_deepseek_v4_tokenizer(tokenizer: HfTokenizer) -> HfTokenizer:
                 messages.insert(0, {"role": "system"})
                 messages[0]["tools"] = tools  # type: ignore[typeddict-unknown-key]
 
+            # 0.25.1: "max"/"xhigh" prepend its maximum-effort text, any other level
+            # adds no text. In this encoder that text is the "high" entry and "low"
+            # adds none.
             reasoning_effort = kwargs.get("reasoning_effort")
             if not isinstance(reasoning_effort, str):
-                reasoning_effort = "high" if thinking_enabled else None
+                reasoning_effort = None
             elif reasoning_effort == "none":
                 thinking_mode = "chat"
                 reasoning_effort = None
-            elif reasoning_effort == "max":
-                reasoning_effort = "max"
-            elif reasoning_effort in ("low", "minimal", "medium"):
-                reasoning_effort = "low"
-            else:
+            elif reasoning_effort in ("max", "xhigh"):
                 reasoning_effort = "high"
+            else:
+                reasoning_effort = "low"
 
             encode_config = dict(
                 thinking_mode=thinking_mode,
