@@ -77,16 +77,13 @@ def test_deepseek_v4_tokenizer_registered():
     )
 
 
-def test_deepseek_v4_defaults_to_thinking_with_high_effort():
+def test_deepseek_v4_defaults_to_chat_mode():
     prompt = _tokenizer().apply_chat_template(
         [{"role": "user", "content": "Hello"}],
         tokenize=False,
     )
 
-    assert prompt.startswith(
-        "<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"
-    )
-    assert prompt.endswith("<｜Assistant｜><think>")
+    assert prompt == ("<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜></think>")
 
 
 @pytest.mark.parametrize("kwargs", [{"thinking": True}, {"enable_thinking": True}])
@@ -97,10 +94,7 @@ def test_deepseek_v4_enables_thinking_with_compatible_kwargs(kwargs):
         **kwargs,
     )
 
-    assert prompt.startswith(
-        "<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"
-    )
-    assert prompt.endswith("<｜Assistant｜><think>")
+    assert prompt == ("<｜begin▁of▁sentence｜><｜User｜>Hello<｜Assistant｜><think>")
 
 
 @pytest.mark.parametrize("kwargs", [{"thinking": False}, {"enable_thinking": False}])
@@ -229,10 +223,8 @@ def test_deepseek_v4_uses_v4_tool_prompt_from_request_tools():
     assert "</｜DSML｜tool_calls>" in prompt
     assert "function_calls" not in prompt
     assert '"name": "get_weather"' in prompt
-    assert prompt.startswith(
-        "<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"
-    )
-    assert prompt.endswith("<｜User｜>Weather?<｜Assistant｜><think>")
+    assert prompt.startswith("<｜begin▁of▁sentence｜>\n\n## Tools")
+    assert prompt.endswith("<｜User｜>Weather?<｜Assistant｜></think>")
 
 
 def test_deepseek_v4_renders_parsed_history_tool_arguments():
@@ -296,8 +288,8 @@ def test_deepseek_v4_renders_parsed_history_tool_arguments():
     ("reasoning_effort", "expected_prefix"),
     [
         ("low", "<｜begin▁of▁sentence｜><｜User｜>Hello"),
-        ("high", "<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"),
-        ("max", "<｜begin▁of▁sentence｜>Reasoning Effort: Beyond maximum"),
+        ("high", "<｜begin▁of▁sentence｜><｜User｜>Hello"),
+        ("max", "<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"),
     ],
 )
 def test_deepseek_v4_renders_0731_reasoning_effort_prompts(
@@ -332,10 +324,10 @@ def test_deepseek_v4_none_reasoning_effort_disables_thinking():
         ("minimal", "thinking", "low"),
         ("low", "thinking", "low"),
         ("medium", "thinking", "low"),
-        ("high", "thinking", "high"),
+        ("high", "thinking", "low"),
         ("xhigh", "thinking", "high"),
-        ("max", "thinking", "max"),
-        ("unexpected", "thinking", "high"),
+        ("max", "thinking", "high"),
+        ("unexpected", "thinking", "low"),
     ],
 )
 def test_deepseek_v4_maps_compatible_thinking_reasoning_effort_values(
@@ -374,7 +366,9 @@ def test_deepseek_v4_renders_0731_max_reasoning_effort():
         reasoning_effort="max",
     )
 
-    assert prompt.startswith("<｜begin▁of▁sentence｜>Reasoning Effort: Beyond maximum")
+    assert prompt.startswith(
+        "<｜begin▁of▁sentence｜>Reasoning Effort: Absolute maximum"
+    )
 
 
 def test_deepseek_v4_maps_xhigh_to_high_reasoning_effort():

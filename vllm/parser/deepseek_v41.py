@@ -63,3 +63,4 @@ def deepseek_v41_config(thinking: bool = False) -> ParserEngineConfig:
 
 class DeepSeekV41Parser(DeepSeekV4Parser):
     parser_config = staticmethod(deepseek_v41_config)
+    thinking_by_default = True

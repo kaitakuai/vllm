@@ -460,10 +460,10 @@ class TestThinkingModeConfig:
     @pytest.mark.parametrize(
         ("chat_template_kwargs", "expected_state"),
         [
-            ({}, "REASONING"),
+            ({}, "CONTENT"),
             ({"thinking": True}, "REASONING"),
             ({"enable_thinking": True}, "REASONING"),
-            ({"reasoning_effort": "high"}, "REASONING"),
+            ({"reasoning_effort": "high"}, "CONTENT"),
             ({"thinking": False}, "CONTENT"),
             ({"enable_thinking": False}, "CONTENT"),
             (
@@ -1077,7 +1077,7 @@ class TestDelegatingParserLargeDelta:
         args = json.loads(output.tool_calls[0]["arguments"])
         assert args == {"location": "Berlin", "units": "celsius"}
 
-    def test_default_thinking_extracts_tool_call_without_think_end(self, dsv4_tokens):
+    def test_thinking_extracts_tool_call_without_think_end(self, dsv4_tokens):
         tokens = [
             token
             for token in dsv4_tokens
@@ -1087,7 +1087,9 @@ class TestDelegatingParserLargeDelta:
             vocab=dict(_DSV4_FULL_VOCAB),
             tokens=tokens,
         )
-        parser = _DeepSeekV4Delegating(tokenizer)
+        parser = _DeepSeekV4Delegating(
+            tokenizer, chat_template_kwargs={"thinking": True}
+        )
 
         deltas = replay_streaming(
             parser,
