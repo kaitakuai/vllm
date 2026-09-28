@@ -237,6 +237,8 @@ def deepseek_v4_config(thinking: bool = False) -> ParserEngineConfig:
 
 class DeepSeekV4Parser(ParserEngine):
     parser_config = staticmethod(deepseek_v4_config)
+    # Same default as the model's tokenizer when the request sets neither flag.
+    thinking_by_default = False
 
     def __init__(
         self,
@@ -249,7 +251,7 @@ class DeepSeekV4Parser(ParserEngine):
             chat_kwargs.get("thinking") or chat_kwargs.get("enable_thinking")
         )
         if "thinking" not in chat_kwargs and "enable_thinking" not in chat_kwargs:
-            thinking = True
+            thinking = self.thinking_by_default
         thinking = thinking and chat_kwargs.get("reasoning_effort") != "none"
         super().__init__(
             tokenizer,
