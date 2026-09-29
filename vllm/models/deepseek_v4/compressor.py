@@ -408,12 +408,15 @@ class DeepseekCompressor(nn.Module):
             pdl_kwargs=pdl_kwargs,
         )
 
-        # full graph cannot branch on per-step CPU metadata after capture
+        # A captured graph cannot branch on per-step CPU metadata. That holds for
+        # PIECEWISE graphs too: breakable CUDA graphs record the compressor, so
+        # the branch taken at capture would repeat on every replay. Skip only in
+        # eager mode.
         if (
             current_platform.is_cuda()
             and self.head_dim == 512
             and self.compress_ratio == 128
-            and forward_context.cudagraph_runtime_mode != CUDAGraphMode.FULL
+            and forward_context.cudagraph_runtime_mode == CUDAGraphMode.NONE
             and state_metadata.c128_boundary is False
         ):
             return
